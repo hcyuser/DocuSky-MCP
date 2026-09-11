@@ -36,7 +36,7 @@
 這個連結永遠指向最新版。想看歷史版本或更新說明，到
 [Releases 頁面](https://github.com/hcyuser/DocuSky-MCP/releases)。
 
-檔案大約 75 KB，副檔名是 `.mcpb`。瀏覽器可能會提示「不常下載的檔案類型」，選擇保留即可。
+檔案大約 82 KB，副檔名是 `.mcpb`。瀏覽器可能會提示「不常下載的檔案類型」，選擇保留即可。
 
 ---
 
@@ -48,7 +48,7 @@
 - 把檔案**拖進** Claude Desktop 視窗
 - Claude Desktop 選單：**設定 → 擴充功能 → 進階設定 → 安裝擴充功能…**
 
-會跳出安裝畫面，上面列出這個擴充功能的名稱、說明，以及它提供的七個工具。確認後點安裝。
+會跳出安裝畫面，上面列出這個擴充功能的名稱、說明，以及它提供的八個工具。確認後點安裝。
 
 **接著會看到兩個欄位：DocuSky 帳號、DocuSky 密碼。**
 
@@ -71,7 +71,7 @@
 
 第一次使用時，Claude 會詢問你是否允許它使用這個擴充功能的工具，選擇允許即可。
 
-如果它列出了正統道藏、大明一統志、淡新檔案那些資料庫，就代表一切正常。
+如果它列出了宋會要輯稿、大明一統志、淡新檔案那些資料庫，就代表一切正常。
 
 ---
 
@@ -120,11 +120,16 @@
 
 ### 它能做什麼
 
-- **全文檢索** —— 38 個公開資料庫（正統道藏、大明一統志、宋會要輯稿、朝鮮王朝實錄、淡新檔案、馬偕日記……）
+- **全文檢索** —— 38 個公開資料庫（本草經集注、大明一統志、宋會要輯稿、朝鮮王朝實錄、淡新檔案、馬偕日記……）
 - **分布統計** —— 一個詞在不同文獻集、時代、地點的出現分布
 - **取全文** —— 單篇文獻完整讀出，長文自動分段
 - **標記分析** —— 統計文本裡的人名、地名、時間等標記
+- **雙維度交叉統計**（實驗性）—— 同時交叉兩個分類維度，DocuSky 伺服器端功能尚未完整，目前測試過的組合都會被拒絕
 - **私人資料庫** —— 填入帳密後也能查自己在 DocuSky 建的資料庫
+
+### 內嵌顯示 DocuSky 網頁
+
+在支援 **MCP Apps** 的 Claude 版本裡，查公開資料庫時（全文檢索、分布統計、標記分析）Claude 的回覆旁邊會直接內嵌顯示 DocuSky 官方網頁本身的畫面，不只是文字結果。這個功能只在**公開資料庫**（不需帳密）上生效——私人資料庫的登入狀態是伺服器端的，內嵌畫面沒辦法一起帶過去，所以私人查詢仍然只會拿到文字結果。如果你用的 Claude 版本不支援 MCP Apps，這一切照常運作，只是不會出現內嵌畫面。
 
 ---
 
@@ -185,7 +190,7 @@ npm install -g @anthropic-ai/mcpb
 mcpb pack . docusky.mcpb
 ```
 
-產出約 75 KB。驗證 manifest：
+產出約 82 KB。驗證 manifest：
 
 ```bash
 mcpb validate manifest.json
@@ -197,7 +202,7 @@ mcpb validate manifest.json
 
 1. 驗證 `manifest.json`
 2. 打包 `docusky.mcpb`
-3. 解開並實際啟動一次，確認七個工具都在（不會連到 DocuSky）
+3. 解開並實際啟動一次，確認八個工具都在（不會連到 DocuSky）
 4. 上傳為 workflow artifact
 5. 發布 GitHub Release，tag 取自 `manifest.json` 的 `version`
 
@@ -212,6 +217,7 @@ manifest.json           MCPB manifest（宣告工具、user_config、啟動方�
 server.py               進入點 shim
 docusky_mcp/client.py   DocuSky Web API client
 docusky_mcp/server.py   MCP 工具層
+docusky_mcp/ui.py       MCP Apps：ui:// 檢視器資源與 webUrl 產生邏輯
 docusky_mcp/credentials.py  憑證讀取（環境變數優先）
 pyproject.toml          相依套件定義
 uv.lock                 鎖定版本，啟動時用 --frozen 安裝
@@ -261,11 +267,30 @@ uv run --frozen --directory ${__dirname} server.py
 | `get_document` | 取單篇全文 |
 | `post_classification` | 分布統計 |
 | `tag_analysis` | 標記統計 |
+| `twodim_analysis` | 雙維度交叉統計（實驗性，見下方說明） |
 | `check_login` | 檢查登入狀態 |
 
 `search_documents` 刻意不回全文——DocuSky 單篇動輒六千字以上，一次二十筆會塞爆
 context。要讀全文請用 `get_document`，帶入該筆的 `n`，並沿用同一組
 `db` / `query` / `corpus` / `page_size`。
+
+`twodim_analysis` 包的是 DocuSky 2026-01-28 才加上的
+`getQueryTwodimAnalysisJson.php`。實際測試（2026-09-11）發現不管 `dim1`/`dim2`
+帶什麼組合（包括直接沿用 `post_classification` 回傳的 facet 代碼，如
+`COMP`/`TP1`）都會被回覆 `{"code": 1, "message": "Currently not support ..."}`
+拒絕，DocuSky 自己的前端 JS 也還沒接上這個功能的 UI。先留著這個工具，等 DocuSky
+補完後不用再改 client 端。
+
+`search_documents`、`post_classification`、`tag_analysis` 這三個工具，在
+`target="OPEN"` 時回傳的 JSON 裡多了一個 `webUrl` 欄位，指向
+`docusky.org.tw` 上對應的查詢頁（`webApi/webpage-open-3in1.php`，用
+`spType` 切換成一般搜尋 / 分布統計 / 標記分析檢視）。支援 **MCP Apps**
+（`docusky_mcp/ui.py`）的 client 會把這個 URL 用一個沒有外部依賴、手刻
+postMessage 協定的小型 `ui://` 資源嵌成 iframe 顯示；不支援的 client
+就只是多一個可以忽略或當連結用的欄位，行為與加這個功能前完全一樣。
+`target="USER"` 時 `webUrl` 會是 `null`——DocuSky 用伺服器端的 session
+cookie 認證私人資料庫，內嵌用的瀏覽器分頁沒有那個 cookie，硬塞連結只會顯示
+「未登入」，所以私人查詢乾脆不給這個欄位。
 
 ---
 

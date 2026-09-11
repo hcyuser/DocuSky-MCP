@@ -25,8 +25,18 @@ try:  # MCP Python SDK >= 2.0
 except ImportError:  # SDK 1.x, where the class was called FastMCP
     from mcp.server.fastmcp import FastMCP as _Server
 
+try:  # MCP Apps (interactive UI) extension -- landed in the SDK during 2026.
+    from mcp.server.apps import Apps, ResourceCsp
+
+    _HAS_APPS = True
+except ImportError:  # Older SDK: the tools below still work, just as plain text.
+    Apps = None  # type: ignore[assignment,misc]
+    ResourceCsp = None  # type: ignore[assignment,misc]
+    _HAS_APPS = False
+
 from .client import DocuSkyClient, DocuSkyError, strip_xml
 from .credentials import credentials_path, load_credentials
+from .ui import VIEWER_HTML, VIEWER_RESOURCE_URI, build_viewer_url
 
 INSTRUCTIONS = """\
 DocuSky is a digital-humanities platform hosting full-text databases of mostly
@@ -44,9 +54,12 @@ own private databases (needs DOCUSKY_USERNAME / DOCUSKY_PASSWORD).
 
 Query syntax: a bare string is a full-text phrase; `+term` requires a term,
 `-term` excludes one (e.g. `醫 +方 -註`); `.all` matches every document.
-"""
 
-mcp = _Server("docusky", instructions=INSTRUCTIONS, version="0.1.0")
+For public ("OPEN") databases, search_documents, post_classification and
+tag_analysis also return a `webUrl` pointing at the same query on
+docusky.org.tw. MCP Apps-capable hosts render that inline as DocuSky's own
+web page; other hosts can offer it to the user as a plain link instead.
+"""
 
 _credentials = load_credentials()
 _client = DocuSkyClient(
@@ -110,7 +123,18 @@ def _error(exc: Exception) -> str:
     return _dump({"error": str(exc)})
 
 
-@mcp.tool()
+# ---------------------------------------------------------------------------
+# Tool implementations.
+#
+# These are plain functions, not yet decorated: three of them (search_documents,
+# post_classification, tag_analysis) need to be bound to the MCP Apps `Apps()`
+# extension *before* the MCPServer itself is constructed -- the SDK only reads
+# an extension's tools/resources inside `MCPServer.__init__`, with no way to
+# add more afterwards. The registration section at the bottom of this file
+# decorates every function exactly once, in the right order.
+# ---------------------------------------------------------------------------
+
+
 async def list_databases(target: str = "OPEN", include_friend_db: bool = False) -> str:
     """List DocuSky databases available to this server.
 
@@ -139,7 +163,6 @@ async def list_databases(target: str = "OPEN", include_friend_db: bool = False) 
     return _dump({"target": target.upper(), "count": len(databases), "databases": databases})
 
 
-@mcp.tool()
 async def list_corpora(db: str, target: str = "OPEN", include_friend_db: bool = False) -> str:
     """List the corpora inside one database, with document counts.
 
@@ -168,7 +191,6 @@ async def list_corpora(db: str, target: str = "OPEN", include_friend_db: bool = 
     return _dump({"db": db, "target": target.upper(), "corpora": corpora})
 
 
-@mcp.tool()
 async def search_documents(
     db: str,
     query: str = ".all",
@@ -183,6 +205,9 @@ async def search_documents(
 
     Full document text is deliberately omitted — call get_document with a hit's
     `n` (and the same db/corpus/query/page_size) to read one in full.
+
+    For a public ("OPEN") database, the result also carries a `webUrl` to the
+    same search on docusky.org.tw — MCP Apps-capable hosts render it inline.
 
     Args:
         db: Database title.
@@ -222,6 +247,7 @@ async def search_documents(
             "pageSize": message.get("pageSize", page_size),
             "returned": len(results),
             "results": results,
+            "webUrl": build_viewer_url(db=db, corpus=corpus, query=query, target=target),
             "hint": (
                 "Use get_document(db, query, result_number=<n>, corpus, page_size) "
                 "with the same page_size to read a hit in full."
@@ -230,7 +256,6 @@ async def search_documents(
     )
 
 
-@mcp.tool()
 async def get_document(
     db: str,
     result_number: int,
@@ -312,7 +337,6 @@ async def get_document(
     return _dump(payload)
 
 
-@mcp.tool()
 async def post_classification(
     db: str,
     query: str = ".all",
@@ -324,7 +348,11 @@ async def post_classification(
 
     Returns, per facet (corpus, period, place, category…), a distribution of
     [value, document count, hit count] — the quickest way to see how a term is
-    spread across a database.
+    spread across a database. Facet codes returned here (e.g. "COMP", "TP1")
+    are also what twodim_analysis's dim1/dim2 arguments expect.
+
+    For a public ("OPEN") database, the result also carries a `webUrl` to the
+    same breakdown on docusky.org.tw — MCP Apps-capable hosts render it inline.
 
     Args:
         db: Database title.
@@ -355,11 +383,13 @@ async def post_classification(
             "corpus": message.get("corpus", corpus),
             "query": message.get("query", query),
             "facets": facets,
+            "webUrl": build_viewer_url(
+                db=db, corpus=corpus, query=query, target=target, sp_type="postClassification"
+            ),
         }
     )
 
 
-@mcp.tool()
 async def tag_analysis(
     db: str,
     query: str = ".all",
@@ -371,6 +401,9 @@ async def tag_analysis(
 
     Only meaningful for databases whose documents carry inline tagging; returns
     an empty result otherwise.
+
+    For a public ("OPEN") database, the result also carries a `webUrl` to the
+    same summary on docusky.org.tw — MCP Apps-capable hosts render it inline.
 
     Args:
         db: Database title.
@@ -391,11 +424,67 @@ async def tag_analysis(
             "corpus": message.get("corpus", corpus),
             "query": message.get("query", query),
             "tagAnalysis": message.get("tagAnalysis"),
+            "webUrl": build_viewer_url(
+                db=db, corpus=corpus, query=query, target=target, sp_type="tagAnalysis"
+            ),
         }
     )
 
 
-@mcp.tool()
+async def twodim_analysis(
+    db: str,
+    dim1: str,
+    dim2: str,
+    query: str = ".all",
+    corpus: str = "[ALL]",
+    target: str = "OPEN",
+    owner_username: str | None = None,
+) -> str:
+    """Cross-tabulate a query's hits by two DocuSky classification facets at once.
+
+    EXPERIMENTAL: DocuSky added this endpoint on 2026-01-28, but live testing
+    on 2026-09-11 found it rejects every dim1/dim2 pair tried so far —
+    including facet codes taken straight from post_classification's own
+    output, such as "COMP"/"TP1" — with `{"code": 1, "message": "Currently
+    not support ..."}`. DocuSky's own front-end has not wired up a UI for it
+    yet either. Call post_classification first to see which facet codes
+    exist for a database, try them here, and expect DocuSky may still refuse
+    the combination while this feature is unfinished on their end.
+
+    Args:
+        db: Database title.
+        dim1: First classification facet code (a key from post_classification's
+            "facets", e.g. "COMP" or "TP1").
+        dim2: Second classification facet code to cross with the first.
+        query: Search terms, or ".all" for the whole database.
+        corpus: Corpus title, or "[ALL]".
+        target: "OPEN" or "USER".
+        owner_username: Owner of a friend-shared database, when applicable.
+    """
+    try:
+        message = await _client.twodim_analysis(
+            db=db,
+            dim1=dim1,
+            dim2=dim2,
+            query=query,
+            corpus=corpus,
+            target=target,
+            owner_username=owner_username,
+        )
+    except DocuSkyError as exc:
+        return _error(exc)
+    return _dump(
+        {
+            "db": db,
+            "corpus": corpus,
+            "query": query,
+            "dim1": dim1,
+            "dim2": dim2,
+            "result": message,
+        }
+    )
+
+
 async def check_login() -> str:
     """Report whether DocuSky credentials are configured and whether they work.
 
@@ -436,6 +525,46 @@ async def check_login() -> str:
         return _dump(payload)
     payload["loggedIn"] = True
     return _dump(payload)
+
+
+# ---------------------------------------------------------------------------
+# Registration.
+#
+# `Apps`-bound tools must be attached *before* `_Server(...)` is constructed
+# (see the comment above the tool implementations). Everything else registers
+# afterwards, same as before this feature existed.
+# ---------------------------------------------------------------------------
+
+apps = Apps() if _HAS_APPS else None
+if apps is not None:
+    apps.tool(resource_uri=VIEWER_RESOURCE_URI)(search_documents)
+    apps.tool(resource_uri=VIEWER_RESOURCE_URI)(post_classification)
+    apps.tool(resource_uri=VIEWER_RESOURCE_URI)(tag_analysis)
+    apps.add_html_resource(
+        VIEWER_RESOURCE_URI,
+        VIEWER_HTML,
+        title="DocuSky 網頁檢視",
+        description="內嵌顯示 DocuSky 官方的查詢結果／分布統計／標記分析頁面",
+        csp=ResourceCsp(frame_domains=["docusky.org.tw"]),
+    )
+
+mcp = _Server(
+    "docusky",
+    instructions=INSTRUCTIONS,
+    version="0.2.0",
+    extensions=[apps] if apps is not None else None,
+)
+
+mcp.tool()(list_databases)
+mcp.tool()(list_corpora)
+mcp.tool()(get_document)
+mcp.tool()(twodim_analysis)
+mcp.tool()(check_login)
+if apps is None:
+    # SDK predates MCP Apps: register these as plain text-only tools instead.
+    mcp.tool()(search_documents)
+    mcp.tool()(post_classification)
+    mcp.tool()(tag_analysis)
 
 
 def main() -> None:

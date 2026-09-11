@@ -273,3 +273,38 @@ class DocuSkyClient:
                 "ownerUsername": owner_username,
             },
         )
+
+    async def twodim_analysis(
+        self,
+        db: str,
+        dim1: str,
+        dim2: str,
+        query: str = ".all",
+        corpus: str = "[ALL]",
+        target: str = "OPEN",
+        owner_username: str | None = None,
+    ) -> Any:
+        """Cross-tabulate by two classification facets at once.
+
+        EXPERIMENTAL on DocuSky's own side: added 2026-01-28
+        (``getQueryTwodimAnalysisJson.php``), but live testing on 2026-09-11
+        showed it answers ``{"code": 1, "message": "Currently not support
+        ..."}`` for every ``dim1``/``dim2`` pair tried so far, including
+        facet codes read straight from ``post_classification``'s own output.
+        DocuSky's own front-end JS has not wired up a UI for it either yet.
+        Kept here so this client stays current the moment DocuSky finishes
+        the feature; a failure surfaces as a normal ``DocuSkyError``.
+        """
+        await self.ensure_login(target)
+        return await self._call(
+            "getQueryTwodimAnalysisJson.php",
+            params={
+                "target": target.upper(),
+                "db": db,
+                "corpus": corpus,
+                "query": query,
+                "dim1": dim1,
+                "dim2": dim2,
+                "ownerUsername": owner_username,
+            },
+        )

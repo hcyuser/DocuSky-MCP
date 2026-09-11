@@ -1,6 +1,6 @@
 [project]
 name = "docusky-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP server for DocuSky (數位人文學術研究平台) — query DocuSky databases from Claude, Gemini, or any MCP client."
 readme = "README.md"
 requires-python = ">=3.10"

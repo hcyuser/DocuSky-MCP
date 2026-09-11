@@ -1,6 +1,6 @@
 # DocuSky MCP
 
-<img width="1178" height="787" alt="Screenshot 2026-09-12 at 2 17 19 AM" src="https://github.com/user-attachments/assets/8d3dc48e-1d22-46d6-a779-282f38b301d5" />
+<img width="589" height="350" alt="Screenshot 2026-09-12 at 2 17 19 AM" src="https://github.com/user-attachments/assets/8d3dc48e-1d22-46d6-a779-282f38b301d5" />
 
 讓 Claude 直接查詢 **[DocuSky 數位人文學術研究平台](https://docusky.org.tw)** 的資料庫。
 
@@ -13,8 +13,10 @@
 > 「把《真誥》那一筆的全文調出來」
 
 ---
-<img width="883" height="781" alt="Screenshot 2026-09-12 at 2 17 00 AM" src="https://github.com/user-attachments/assets/9b260acb-3558-4d9d-af55-220f8235c498" />
-<img width="985" height="598" alt="Screenshot 2026-09-12 at 2 56 56 AM" src="https://github.com/user-attachments/assets/f434839e-5c03-4e27-9224-d1c222fb337e" />
+<img width="88.3" height="78.1" alt="Screenshot 2026-09-12 at 2 17 00 AM" src="https://github.com/user-attachments/assets/9b260acb-3558-4d9d-af55-220f8235c498" />
+<img width="98.5" height="59.8" alt="Screenshot 2026-09-12 at 2 56 56 AM" src="https://github.com/user-attachments/assets/f434839e-5c03-4e27-9224-d1c222fb337e" />
+<img width="88.7" height="78.7" alt="Screenshot 2026-09-12 at 3 49 26 AM" src="https://github.com/user-attachments/assets/a6fc634f-179e-40cd-866d-de129a7f9ce2" />
+<img width="89.2" height="79.2" alt="Screenshot 2026-09-12 at 3 47 28 AM" src="https://github.com/user-attachments/assets/25c55745-0c7d-422d-8f34-ae764c7bcd6a" />
 
 
 ## 給使用者

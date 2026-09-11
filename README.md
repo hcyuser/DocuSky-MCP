@@ -14,6 +14,7 @@
 
 ---
 <img width="883" height="781" alt="Screenshot 2026-09-12 at 2 17 00 AM" src="https://github.com/user-attachments/assets/9b260acb-3558-4d9d-af55-220f8235c498" />
+<img width="985" height="598" alt="Screenshot 2026-09-12 at 2 56 56 AM" src="https://github.com/user-attachments/assets/f434839e-5c03-4e27-9224-d1c222fb337e" />
 
 
 ## 給使用者

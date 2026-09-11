@@ -1,5 +1,7 @@
 # DocuSky MCP
 
+<img width="1178" height="787" alt="Screenshot 2026-09-12 at 2 17 19 AM" src="https://github.com/user-attachments/assets/8d3dc48e-1d22-46d6-a779-282f38b301d5" />
+
 讓 Claude 直接查詢 **[DocuSky 數位人文學術研究平台](https://docusky.org.tw)** 的資料庫。
 
 打包成 `.mcpb` 之後，使用者**雙擊就能安裝**，不需要碰終端機。裝好就可以用日常語言問問題：
@@ -11,6 +13,8 @@
 > 「把《真誥》那一筆的全文調出來」
 
 ---
+<img width="883" height="781" alt="Screenshot 2026-09-12 at 2 17 00 AM" src="https://github.com/user-attachments/assets/9b260acb-3558-4d9d-af55-220f8235c498" />
+
 
 ## 給使用者
 

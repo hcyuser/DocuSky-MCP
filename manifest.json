@@ -1,0 +1,100 @@
+{
+  "manifest_version": "0.4",
+  "name": "docusky",
+  "display_name": "DocuSky 數位人文檢索",
+  "version": "0.1.3",
+  "description": "查詢 DocuSky 數位人文學術研究平台：全文檢索、分布統計、取全文。",
+  "long_description": "讓 Claude 直接查詢 DocuSky 數位人文學術研究平台（docusky.org.tw）的資料庫。支援 38 個公開資料庫的全文檢索（正統道藏、大明一統志、宋會要輯稿、朝鮮王朝實錄、淡新檔案、馬偕日記等），可做分布統計、取單篇全文、標記分析。填入帳號密碼後也能查詢自己的私人資料庫。公開資料庫不需要帳號。",
+  "author": {
+    "name": "hcyuser",
+    "url": "https://github.com/hcyuser"
+  },
+  "homepage": "https://github.com/hcyuser/DocuSky-MCP",
+  "documentation": "https://github.com/hcyuser/DocuSky-MCP#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hcyuser/DocuSky-MCP"
+  },
+  "license": "MIT",
+  "keywords": [
+    "digital-humanities",
+    "docusky",
+    "chinese",
+    "sinology",
+    "full-text-search"
+  ],
+  "server": {
+    "type": "uv",
+    "entry_point": "server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--frozen",
+        "--directory",
+        "${__dirname}",
+        "server.py"
+      ],
+      "env": {
+        "DOCUSKY_USERNAME": "${user_config.username}",
+        "DOCUSKY_PASSWORD": "${user_config.password}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "list_databases",
+      "description": "列出可用的 DocuSky 資料庫（公開或自己的）"
+    },
+    {
+      "name": "list_corpora",
+      "description": "列出某資料庫底下的文獻集與篇數"
+    },
+    {
+      "name": "search_documents",
+      "description": "全文檢索，回傳書目資料與摘錄"
+    },
+    {
+      "name": "get_document",
+      "description": "取出單篇文獻全文，長文自動分段"
+    },
+    {
+      "name": "post_classification",
+      "description": "統計檢索結果在各文獻集、時代、地點的分布"
+    },
+    {
+      "name": "tag_analysis",
+      "description": "統計文本中的 DocuXML 標記（人名、地名、時間等）"
+    },
+    {
+      "name": "check_login",
+      "description": "檢查 DocuSky 登入狀態"
+    }
+  ],
+  "user_config": {
+    "username": {
+      "type": "string",
+      "title": "DocuSky 帳號",
+      "description": "只有要查詢自己的私人資料庫時才需要填。公開資料庫留空即可。",
+      "required": false
+    },
+    "password": {
+      "type": "string",
+      "title": "DocuSky 密碼",
+      "description": "只有要查詢自己的私人資料庫時才需要填。由 Claude Desktop 安全儲存，不會出現在對話中。",
+      "sensitive": true,
+      "required": false
+    }
+  },
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ],
+    "runtimes": {
+      "python": ">=3.10"
+    }
+  }
+}

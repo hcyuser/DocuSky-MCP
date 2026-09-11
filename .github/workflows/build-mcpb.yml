@@ -1,0 +1,106 @@
+name: Build MCPB
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write          # needed to publish the release asset
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install MCPB CLI
+        run: npm install -g @anthropic-ai/mcpb
+
+      - name: Read version from manifest
+        id: meta
+        run: echo "version=$(jq -r .version manifest.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Validate manifest
+        run: mcpb validate manifest.json
+
+      - name: Pack bundle
+        run: mcpb pack . docusky.mcpb
+
+      # Unpack into a clean directory and start the server the way the manifest
+      # tells a host to. This catches import errors, a stale uv.lock, and broken
+      # tool definitions. It talks to the server over stdio only — no requests
+      # are made to DocuSky.
+      - name: Smoke test the bundle
+        run: |
+          mcpb unpack docusky.mcpb ./unpacked
+          # `uv run --directory` also changes the child's working directory, so
+          # the inner path has to be absolute.
+          export UNPACKED="$PWD/unpacked"
+          uv run --frozen --directory ./unpacked python - <<'PY'
+          import asyncio, os, sys
+          from mcp import ClientSession, StdioServerParameters, stdio_client
+
+          EXPECTED = {
+              "list_databases", "list_corpora", "search_documents",
+              "get_document", "post_classification", "tag_analysis", "check_login",
+          }
+
+          async def main() -> None:
+              unpacked = os.environ["UNPACKED"]
+              params = StdioServerParameters(
+                  command="uv",
+                  args=["run", "--frozen", "--directory", unpacked, "server.py"],
+              )
+              async with stdio_client(params) as (read, write):
+                  async with ClientSession(read, write) as session:
+                      await session.initialize()
+                      found = {t.name for t in (await session.list_tools()).tools}
+              missing = EXPECTED - found
+              extra = found - EXPECTED
+              print(f"tools: {sorted(found)}")
+              if missing or extra:
+                  sys.exit(f"tool mismatch — missing {sorted(missing)}, unexpected {sorted(extra)}")
+              print("bundle starts and exposes the expected tools")
+
+          asyncio.run(main())
+          PY
+
+      # Every run keeps a downloadable copy, including runs on branches or
+      # manual dispatches that never touch a release.
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docusky-mcpb-${{ steps.meta.outputs.version }}
+          path: docusky.mcpb
+          retention-days: 90
+
+      # Publish so people can download without a GitHub account. The tag follows
+      # manifest.json, and re-running on the same version replaces the asset
+      # rather than failing.
+      - name: Publish release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ steps.meta.outputs.version }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists — replacing the asset."
+            gh release upload "$TAG" docusky.mcpb --clobber
+          else
+            gh release create "$TAG" docusky.mcpb \
+              --title "DocuSky $TAG" \
+              --notes "DocuSky MCP extension.
+
+          安裝方式：下載 \`docusky.mcpb\` 後雙擊，或拖進 Claude Desktop 視窗。
+
+          Built from \`${{ github.sha }}\`."
+          fi

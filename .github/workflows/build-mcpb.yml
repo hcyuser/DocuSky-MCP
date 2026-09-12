@@ -53,6 +53,7 @@ jobs:
               "list_databases", "list_corpora", "search_documents",
               "get_document", "post_classification", "tag_analysis",
               "twodim_analysis", "word_cloud", "check_login",
+              "docugis_map",
           }
 
           async def main() -> None:

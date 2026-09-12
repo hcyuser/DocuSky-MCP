@@ -36,7 +36,13 @@ except ImportError:  # Older SDK: the tools below still work, just as plain text
 
 from .client import DocuSkyClient, DocuSkyError, strip_xml
 from .credentials import credentials_path, load_credentials
-from .ui import VIEWER_HTML, VIEWER_RESOURCE_URI, build_viewer_url
+from .ui import (
+    VIEWER_HTML,
+    VIEWER_RESOURCE_URI,
+    WORDCLOUD_MAX_TERMS,
+    build_viewer_url,
+    build_wordcloud_url,
+)
 
 INSTRUCTIONS = """\
 DocuSky is a digital-humanities platform hosting full-text databases of mostly
@@ -59,6 +65,12 @@ For public ("OPEN") databases, search_documents, post_classification and
 tag_analysis also return a `webUrl` pointing at the same query on
 docusky.org.tw. MCP Apps-capable hosts render that inline as DocuSky's own
 web page; other hosts can offer it to the user as a plain link instead.
+
+word_cloud takes frequency data you already have — tag counts from
+tag_analysis, a facet distribution from post_classification, or terms you
+counted yourself in a get_document body — and renders it in DocuSky's own
+WordCloudLite tool, which also offers bubble/bar/table views of the same
+numbers.
 """
 
 _credentials = load_credentials()
@@ -126,12 +138,12 @@ def _error(exc: Exception) -> str:
 # ---------------------------------------------------------------------------
 # Tool implementations.
 #
-# These are plain functions, not yet decorated: three of them (search_documents,
-# post_classification, tag_analysis) need to be bound to the MCP Apps `Apps()`
-# extension *before* the MCPServer itself is constructed -- the SDK only reads
-# an extension's tools/resources inside `MCPServer.__init__`, with no way to
-# add more afterwards. The registration section at the bottom of this file
-# decorates every function exactly once, in the right order.
+# These are plain functions, not yet decorated: four of them (search_documents,
+# post_classification, tag_analysis, word_cloud) need to be bound to the MCP
+# Apps `Apps()` extension *before* the MCPServer itself is constructed -- the
+# SDK only reads an extension's tools/resources inside `MCPServer.__init__`,
+# with no way to add more afterwards. The registration section at the bottom
+# of this file decorates every function exactly once, in the right order.
 # ---------------------------------------------------------------------------
 
 
@@ -485,6 +497,46 @@ async def twodim_analysis(
     )
 
 
+async def word_cloud(
+    terms: dict[str, float],
+    max_terms: int = WORDCLOUD_MAX_TERMS,
+) -> str:
+    """Draw a word cloud of term frequencies in DocuSky's own WordCloudLite tool.
+
+    Takes numbers you already have and turns them into a DocuSky visualization:
+    tag counts from tag_analysis, a facet distribution from post_classification
+    (its `value` / `docCount` pairs), or terms you counted yourself in text from
+    get_document. This tool does no counting and no searching of its own.
+
+    Returns a `webUrl` to the rendered cloud — MCP Apps-capable hosts show it
+    inline, other hosts can offer it as a link. The rendered page also has
+    buttons for bubble, top-10 bar and table views of the same data, plus Save.
+
+    WordCloudLite draws a random subset of a large term list, so pass roughly
+    20-40 terms when every word should appear.
+
+    Args:
+        terms: Term -> weight, e.g. {"針灸": 120, "湯液": 48}. Weights must be
+            positive; non-integers are rescaled proportionally. Commas and
+            semicolons in a term are replaced with spaces (the tool's URL format
+            uses them as separators).
+        max_terms: Keep at most this many of the heaviest terms (default 150).
+            A very long list is also trimmed further to fit DocuSky's URL limit.
+    """
+    try:
+        url, used, notes = build_wordcloud_url(terms, max_terms=max_terms)
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return _error(exc)
+    return _dump(
+        {
+            "termCount": len(used),
+            "terms": [{"name": item["name"], "value": item["value"]} for item in used],
+            "notes": notes,
+            "webUrl": url,
+        }
+    )
+
+
 async def check_login() -> str:
     """Report whether DocuSky credentials are configured and whether they work.
 
@@ -540,18 +592,19 @@ if apps is not None:
     apps.tool(resource_uri=VIEWER_RESOURCE_URI)(search_documents)
     apps.tool(resource_uri=VIEWER_RESOURCE_URI)(post_classification)
     apps.tool(resource_uri=VIEWER_RESOURCE_URI)(tag_analysis)
+    apps.tool(resource_uri=VIEWER_RESOURCE_URI)(word_cloud)
     apps.add_html_resource(
         VIEWER_RESOURCE_URI,
         VIEWER_HTML,
         title="DocuSky 網頁檢視",
-        description="內嵌顯示 DocuSky 官方的查詢結果／分布統計／標記分析頁面",
+        description="內嵌顯示 DocuSky 官方的查詢結果／分布統計／標記分析／文字雲頁面",
         csp=ResourceCsp(frame_domains=["docusky.org.tw"]),
     )
 
 mcp = _Server(
     "docusky",
     instructions=INSTRUCTIONS,
-    version="0.2.0",
+    version="0.3.0",
     extensions=[apps] if apps is not None else None,
 )
 
@@ -565,6 +618,7 @@ if apps is None:
     mcp.tool()(search_documents)
     mcp.tool()(post_classification)
     mcp.tool()(tag_analysis)
+    mcp.tool()(word_cloud)
 
 
 def main() -> None:

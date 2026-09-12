@@ -1,9 +1,9 @@
 """MCP Apps (interactive UI) support for the DocuSky MCP server.
 
-Wires `search_documents`, `post_classification`, and `tag_analysis` to a
-`ui://` resource so hosts that support the MCP Apps extension
-(https://modelcontextprotocol.io/extensions/apps/overview) render DocuSky's
-own web page inline, in a sandboxed iframe, instead of only text.
+Wires `search_documents`, `post_classification`, `tag_analysis` and
+`word_cloud` to a `ui://` resource so hosts that support the MCP Apps
+extension (https://modelcontextprotocol.io/extensions/apps/overview) render
+DocuSky's own web page inline, in a sandboxed iframe, instead of only text.
 
 How it works
 ------------
@@ -29,7 +29,10 @@ httpx client. The viewer's browser (inside the sandboxed iframe) does not
 share that cookie, so an embedded "USER" (private-database) page would just
 show a logged-out DocuSky -- confusing, not useful. `build_viewer_url`
 returns None for anything but "OPEN", and the affected tools fall back to
-plain text only, exactly as before this feature existed.
+plain text only, exactly as before this feature existed. `word_cloud` (see
+`build_wordcloud_url` at the bottom of this file) is unaffected: it embeds a
+stateless tool page whose whole input travels in the URL, so it needs no
+DocuSky session at all.
 
 Verified live against https://docusky.org.tw on 2026-09-11
 ------------------------------------------------------------
@@ -44,10 +47,15 @@ Verified live against https://docusky.org.tw on 2026-09-11
   guessed `target`/`db`/`corpus`/`query` params simply rendered blank. If
   DocuSky documents that API later, swapping the URL builder below is all
   that's needed; the postMessage/rendering side does not change.
+  WordCloudLite turned out to be the exception (added 2026-09-12): its source
+  does document two query parameters, so `build_wordcloud_url` drives it
+  directly -- see the comment above that function.
 """
 
 from __future__ import annotations
 
+import json
+from typing import Any
 from urllib.parse import urlencode
 
 DOCUSKY_SITE_BASE = "https://docusky.org.tw/DocuSky"
@@ -189,3 +197,137 @@ VIEWER_HTML = r"""<!doctype html>
 </body>
 </html>
 """
+
+
+# ---------------------------------------------------------------------------
+# WordCloudLite (https://docusky.org.tw/docusky/docuTools/WordCloudLite/)
+#
+# Read from its source on 2026-09-12: the page accepts exactly two URL query
+# parameters -- `url=<some.csv>` and `data=<name,value;name,value;...>`. Every
+# other setting (title, backgroundColor, hideControlBar, ...) arrives only via
+# `postMessage`, and its handler rejects any origin that is not docusky.org.tw
+# itself, so a sandboxed MCP Apps iframe cannot use it. `url=` needs a CSV
+# somewhere public, which a stdio MCP server has no way to host. That leaves
+# `data=`, which is enough.
+#
+# Two things the page's own code forces on the caller, both verified live:
+#
+# * `data=` values stay JavaScript *strings* (the parser only does
+#   `v.split(',')`), while the drawing code does `d3.max(data, d => d.value)`
+#   and expects numbers -- d3 v5 compares strings lexicographically, so a set
+#   like 100/90/9 makes "9" the maximum, every font size overshoots, and the
+#   page renders BLANK. Zero-padding every value to the same width makes
+#   lexicographic order match numeric order and fixes it ("090" < "100"), and
+#   the later arithmetic (`d.value / maxValue`) coerces padded strings fine.
+# * DocuSky's Apache answers 200 for a ~15 KB URL and 414 for ~24 KB, so the
+#   built URL is trimmed (smallest terms first) to stay under the cap.
+#
+# Note the page deliberately draws a random subset when it is given many terms
+# (see its `plotWordCloud`), so a cloud of ~20-40 terms is what reliably shows
+# every word passed in.
+# ---------------------------------------------------------------------------
+
+WORDCLOUD_PAGE = "https://docusky.org.tw/docusky/docuTools/WordCloudLite/WordCloudLite.html"
+WORDCLOUD_URL_LIMIT = 15000
+WORDCLOUD_MAX_TERMS = 150
+
+
+def build_wordcloud_url(
+    terms: dict[str, float] | list[Any],
+    max_terms: int = WORDCLOUD_MAX_TERMS,
+) -> tuple[str, list[dict[str, Any]], list[str]]:
+    """Build a WordCloudLite URL for `terms`.
+
+    Accepts either {"term": weight, ...} or a list of {"name","value"} /
+    ("name", value) pairs. Returns (url, terms actually included, notes about
+    anything adjusted or dropped). Raises ValueError when nothing is usable.
+    """
+    pairs = _normalize_terms(terms)
+    notes: list[str] = []
+
+    cleaned: dict[str, float] = {}
+    dropped_empty = dropped_value = 0
+    for name, value in pairs:
+        name = " ".join(str(name).replace(",", " ").replace(";", " ").split())
+        if not name:
+            dropped_empty += 1
+            continue
+        try:
+            weight = float(value)
+        except (TypeError, ValueError):
+            dropped_value += 1
+            continue
+        if weight <= 0:
+            dropped_value += 1
+            continue
+        cleaned[name] = max(cleaned.get(name, 0.0), weight)
+
+    if not cleaned:
+        raise ValueError("No usable terms: each needs a non-empty name and a positive number.")
+    if dropped_empty:
+        notes.append(f"{dropped_empty} term(s) with an empty name were skipped.")
+    if dropped_value:
+        notes.append(f"{dropped_value} term(s) without a positive numeric value were skipped.")
+
+    ordered = sorted(cleaned.items(), key=lambda kv: (-kv[1], kv[0]))
+    if max_terms > 0 and len(ordered) > max_terms:
+        notes.append(f"Kept the top {max_terms} of {len(ordered)} terms.")
+        ordered = ordered[:max_terms]
+
+    # Scale to positive integers: the page needs equal-width numeric strings.
+    top = ordered[0][1]
+    if any(float(v) != int(v) for _, v in ordered) or top < 1:
+        scale = 999.0 / top
+        weights = [max(1, round(v * scale)) for _, v in ordered]
+        notes.append("Values were rescaled to whole numbers; relative sizes are unchanged.")
+    else:
+        weights = [int(v) for _, v in ordered]
+    width = len(str(max(weights)))
+    used = [
+        {
+            "name": name,
+            "value": int(original) if float(original).is_integer() else original,
+            "plotted": str(w).zfill(width),
+        }
+        for (name, original), w in zip(ordered, weights)
+    ]
+
+    url = _encode_wordcloud_url(used)
+    while len(url) > WORDCLOUD_URL_LIMIT and len(used) > 1:
+        used.pop()
+        url = _encode_wordcloud_url(used)
+    if len(used) < len(ordered):
+        notes.append(
+            f"{len(ordered) - len(used)} of the smallest term(s) were dropped to keep the "
+            "URL within DocuSky's length limit."
+        )
+    if len(used) > 40:
+        notes.append(
+            "WordCloudLite draws a random subset when given many terms; pass roughly 20-40 "
+            "terms if every word must appear."
+        )
+    return url, used, notes
+
+
+def _normalize_terms(terms: dict[str, float] | list[Any]) -> list[tuple[Any, Any]]:
+    """Flatten the shapes a caller might send into (name, value) pairs."""
+    if isinstance(terms, str):
+        terms = json.loads(terms)
+    if isinstance(terms, dict):
+        return list(terms.items())
+    pairs: list[tuple[Any, Any]] = []
+    for item in terms or []:
+        if isinstance(item, dict):
+            name = item.get("name", item.get("term", item.get("word")))
+            value = item.get("value", item.get("count", item.get("weight")))
+            pairs.append((name, value))
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            pairs.append((item[0], item[1]))
+        else:
+            raise ValueError(f"Cannot read a term/value pair from: {item!r}")
+    return pairs
+
+
+def _encode_wordcloud_url(used: list[dict[str, Any]]) -> str:
+    data = ";".join(f"{item['name']},{item['plotted']}" for item in used)
+    return f"{WORDCLOUD_PAGE}?{urlencode({'data': data})}"

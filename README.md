@@ -50,7 +50,7 @@
 - 把檔案**拖進** Claude Desktop 視窗
 - Claude Desktop 選單：**設定 → 擴充功能 → 進階設定 → 安裝擴充功能…**
 
-會跳出安裝畫面，上面列出這個擴充功能的名稱、說明，以及它提供的八個工具。確認後點安裝。
+會跳出安裝畫面，上面列出這個擴充功能的名稱、說明，以及它提供的九個工具。確認後點安裝。
 
 **接著會看到兩個欄位：DocuSky 帳號、DocuSky 密碼。**
 
@@ -126,12 +126,13 @@
 - **分布統計** —— 一個詞在不同文獻集、時代、地點的出現分布
 - **取全文** —— 單篇文獻完整讀出，長文自動分段
 - **標記分析** —— 統計文本裡的人名、地名、時間等標記
+- **文字雲** —— 把詞頻畫成 DocuSky 官方 WordCloudLite 的文字雲（同一份數字也能切換成泡泡圖、Top-10 長條圖、表格）
 - **雙維度交叉統計**（實驗性）—— 同時交叉兩個分類維度，DocuSky 伺服器端功能尚未完整，目前測試過的組合都會被拒絕
 - **私人資料庫** —— 填入帳密後也能查自己在 DocuSky 建的資料庫
 
 ### 內嵌顯示 DocuSky 網頁
 
-在支援 **MCP Apps** 的 Claude 版本裡，查公開資料庫時（全文檢索、分布統計、標記分析）Claude 的回覆旁邊會直接內嵌顯示 DocuSky 官方網頁本身的畫面，不只是文字結果。這個功能只在**公開資料庫**（不需帳密）上生效——私人資料庫的登入狀態是伺服器端的，內嵌畫面沒辦法一起帶過去，所以私人查詢仍然只會拿到文字結果。如果你用的 Claude 版本不支援 MCP Apps，這一切照常運作，只是不會出現內嵌畫面。
+在支援 **MCP Apps** 的 Claude 版本裡，查公開資料庫時（全文檢索、分布統計、標記分析）以及畫文字雲時，Claude 的回覆旁邊會直接內嵌顯示 DocuSky 官方網頁本身的畫面，不只是文字結果。查詢類的內嵌只在**公開資料庫**（不需帳密）上生效——私人資料庫的登入狀態是伺服器端的，內嵌畫面沒辦法一起帶過去，所以私人查詢仍然只會拿到文字結果。文字雲不受這個限制：它畫的是已經拿到手的數字，資料從哪個資料庫來都可以。如果你用的 Claude 版本不支援 MCP Apps，這一切照常運作，只是不會出現內嵌畫面。
 
 ---
 
@@ -204,7 +205,7 @@ mcpb validate manifest.json
 
 1. 驗證 `manifest.json`
 2. 打包 `docusky.mcpb`
-3. 解開並實際啟動一次，確認八個工具都在（不會連到 DocuSky）
+3. 解開並實際啟動一次，確認九個工具都在（不會連到 DocuSky）
 4. 上傳為 workflow artifact
 5. 發布 GitHub Release，tag 取自 `manifest.json` 的 `version`
 
@@ -270,6 +271,7 @@ uv run --frozen --directory ${__dirname} server.py
 | `post_classification` | 分布統計 |
 | `tag_analysis` | 標記統計 |
 | `twodim_analysis` | 雙維度交叉統計（實驗性，見下方說明） |
+| `word_cloud` | 把詞頻畫成 DocuSky WordCloudLite 文字雲 |
 | `check_login` | 檢查登入狀態 |
 
 `search_documents` 刻意不回全文——DocuSky 單篇動輒六千字以上，一次二十筆會塞爆
@@ -283,13 +285,39 @@ context。要讀全文請用 `get_document`，帶入該筆的 `n`，並沿用同
 拒絕，DocuSky 自己的前端 JS 也還沒接上這個功能的 UI。先留著這個工具，等 DocuSky
 補完後不用再改 client 端。
 
+`word_cloud` 不自己統計也不自己查詢，它只負責把**已經有的數字**畫出來：
+`tag_analysis` 的標記次數、`post_classification` 的分布（`value` / `docCount`）、
+或 Claude 從 `get_document` 全文自行數出來的詞頻，傳成
+`{"針灸": 120, "湯液": 48}` 這種 term → 次數的對照表即可。
+
+這個工具包的是 DocuSky 的
+[WordCloudLite](https://docusky.org.tw/docusky/docuTools/WordCloudLite/WordCloudLite.html)。
+讀過它的原始碼（2026-09-12）後確定，它只吃兩個 URL 參數：`url=<某個.csv>` 和
+`data=<詞,值;詞,值;...>`。其餘設定（標題、背景色、隱藏控制列……）只能透過
+`postMessage` 傳，而它的 handler 會擋掉所有非 `docusky.org.tw` 的 origin，內嵌用的
+沙箱 iframe 過不了這關；`url=` 又需要一個公開可讀的 CSV，stdio MCP server 沒地方放。
+所以走 `data=`。實作上有兩個坑，都已實測確認：
+
+- `data=` 傳進去的值在頁面裡**仍然是字串**（它的 parser 只做 `v.split(',')`），
+  但畫圖那段用的是 `d3.max(data, d => d.value)`，而 d3 v5 對字串是**字典序**比較。
+  像 100 / 90 / 9 這組，最大值會變成 `"9"`，所有字級跟著爆掉，畫面**全白**。
+  解法是把每個值補零到同樣位數（`"090" < "100"`），字典序就跟數值序一致，
+  後面的 `d.value / maxValue` 對補零字串也算得出正確比例。
+- DocuSky 的 Apache 對 ~15 KB 的網址回 200、~24 KB 回 414，所以產生的網址會從
+  最小的詞開始砍，砍到長度安全為止。
+
+另外 WordCloudLite 在詞數多的時候會**刻意隨機取樣**一部分來畫（見它的
+`plotWordCloud`），所以想讓每個詞都出現，大約傳 20–40 個詞最穩。
+
 `search_documents`、`post_classification`、`tag_analysis` 這三個工具，在
 `target="OPEN"` 時回傳的 JSON 裡多了一個 `webUrl` 欄位，指向
 `docusky.org.tw` 上對應的查詢頁（`webApi/webpage-open-3in1.php`，用
 `spType` 切換成一般搜尋 / 分布統計 / 標記分析檢視）。支援 **MCP Apps**
 （`docusky_mcp/ui.py`）的 client 會把這個 URL 用一個沒有外部依賴、手刻
 postMessage 協定的小型 `ui://` 資源嵌成 iframe 顯示；不支援的 client
-就只是多一個可以忽略或當連結用的欄位，行為與加這個功能前完全一樣。
+就只是多一個可以忽略或當連結用的欄位，行為與加這個功能前完全一樣。`word_cloud`
+回傳的 `webUrl` 走的是同一個 `ui://` 資源與同一條 CSP（`frameDomains`
+已經涵蓋 `docusky.org.tw`）。
 `target="USER"` 時 `webUrl` 會是 `null`——DocuSky 用伺服器端的 session
 cookie 認證私人資料庫，內嵌用的瀏覽器分頁沒有那個 cookie，硬塞連結只會顯示
 「未登入」，所以私人查詢乾脆不給這個欄位。

@@ -18,9 +18,27 @@ the MCP Apps postMessage protocol (wire format:
 https://github.com/modelcontextprotocol/ext-apps/blob/main/specification/2026-01-26/apps.mdx).
 It performs the `ui/initialize` handshake, waits for the
 `ui/notifications/tool-result` notification, pulls `webUrl` out of the JSON
-text content, and points an `<iframe>` at it. It intentionally does not
+text content, and points an `<iframe>` at it, under a thin toolbar of its own
+(paging, fullscreen, open-in-browser, reload). It intentionally does not
 depend on the `@modelcontextprotocol/ext-apps` npm package, so this project
 stays pure Python with no JS build step.
+
+Three things the published schema and a live DocuSky make non-negotiable, all
+learned the hard way (see "Verified live", below):
+
+* `ui/initialize` params REQUIRE `appInfo`, `appCapabilities` *and*
+  `protocolVersion`. Sending only `appCapabilities` (as this file did before
+  2026-09-12) is invalid params: a host that validates the request rejects the
+  handshake, never pushes the tool result, and the viewer shows nothing.
+* DocuSky's own paginator navigates the whole frame
+  (`window.location.href = ...` inside its `requestNewPage`), which comes back
+  blank inside a sandboxed iframe. Loading `&page=N` as the frame's `src`
+  works, so the toolbar drives paging itself and the note under it warns the
+  user off DocuSky's own page buttons.
+* The viewer asks the host for a 720px-tall inline frame
+  (`ui/notifications/size-changed`) and offers a fullscreen toggle
+  (`ui/request-display-mode`); a retrieval page in a default-height strip is
+  not usable.
 
 Why `target="OPEN"` only
 ------------------------
@@ -34,8 +52,8 @@ plain text only, exactly as before this feature existed. `word_cloud` (see
 stateless tool page whose whole input travels in the URL, so it needs no
 DocuSky session at all.
 
-Verified live against https://docusky.org.tw on 2026-09-11
-------------------------------------------------------------
+Verified live against https://docusky.org.tw on 2026-09-11 / 2026-09-12
+-----------------------------------------------------------------------
 * `webApi/webpage-open-3in1.php` (with `spType=postClassification` /
   `spType=tagAnalysis` / no `spType` at all) renders real data for a public
   database, and its response carries neither `X-Frame-Options` nor a
@@ -50,6 +68,19 @@ Verified live against https://docusky.org.tw on 2026-09-11
   WordCloudLite turned out to be the exception (added 2026-09-12): its source
   does document two query parameters, so `build_wordcloud_url` drives it
   directly -- see the comment above that function.
+
+Sandbox behaviour, measured 2026-09-12 by replaying the reference host
+(`examples/basic-host` in ext-apps: an outer proxy iframe on its own origin
+plus an inner `sandbox`ed iframe) against the real docusky.org.tw:
+
+* `allow-scripts allow-same-origin allow-forms` (what the reference host sets,
+  and what any host that injects the HTML with `document.write` must set):
+  every page of results renders, and the toolbar's `&page=N` paging works.
+  DocuSky's own paginator still does not -- see above.
+* `allow-scripts` without `allow-same-origin` (some hosts, via `srcdoc`):
+  page 1 renders, later pages come back blank no matter how they are
+  requested. The viewer detects this (storage access throws), hides its pager,
+  and points the user at "open in browser" instead of pretending to page.
 """
 
 from __future__ import annotations
@@ -93,18 +124,37 @@ VIEWER_HTML = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>DocuSky 網頁檢視</title>
 <style>
-  :root { color-scheme: light dark; }
+  :root { color-scheme: light dark; --fg: #1a1a1a; --bg: #fff; --bar: #f3f4f6; --line: #d8dade; }
+  body.theme-dark { --fg: #e6e6e6; --bg: #1e1e1e; --bar: #2a2b2e; --line: #3a3b3f; }
   html, body { height: 100%; margin: 0; }
   body {
-    display: flex; flex-direction: column;
+    display: flex; flex-direction: column; background: var(--bg); color: var(--fg);
     font: 13px/1.5 -apple-system, "Segoe UI", "PingFang TC", "Microsoft JhengHei", sans-serif;
-    background: #fff; color: #1a1a1a;
   }
-  body.theme-dark { background: #1e1e1e; color: #e6e6e6; }
-  #frame { flex: 1 1 auto; border: 0; width: 100%; min-height: 480px; background: #fff; }
+  #bar {
+    display: flex; align-items: center; gap: 6px; flex: 0 0 auto;
+    padding: 5px 8px; background: var(--bar); border-bottom: 1px solid var(--line);
+    font-size: 12px; flex-wrap: wrap;
+  }
+  #label { opacity: 0.8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
+  .spacer { flex: 1 1 auto; }
+  button {
+    font: inherit; color: inherit; background: transparent;
+    border: 1px solid var(--line); border-radius: 5px; padding: 2px 8px; cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: rgba(127, 127, 127, 0.16); }
+  button:disabled { opacity: 0.4; cursor: default; }
+  #jump { width: 4.5em; font: inherit; color: inherit; background: var(--bg);
+          border: 1px solid var(--line); border-radius: 5px; padding: 2px 4px; }
+  #pager { display: flex; align-items: center; gap: 4px; }
+  #note { flex: 0 0 auto; padding: 4px 10px; font-size: 11px; opacity: 0.75;
+          background: var(--bar); border-bottom: 1px solid var(--line); }
+  #frame { flex: 1 1 auto; border: 0; width: 100%; background: #fff; transition: opacity 0.15s; }
+  #frame.loading { opacity: 0.35; }
+  #spin { opacity: 0.7; }
   .msg { margin: auto; padding: 24px; text-align: center; max-width: 32em; }
-  .msg code { display: block; margin-top: 8px; white-space: pre-wrap; word-break: break-all; opacity: 0.75; font-size: 12px; }
-  a { color: inherit; }
+  .msg code { display: block; margin-top: 8px; white-space: pre-wrap; word-break: break-all;
+              opacity: 0.75; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -112,7 +162,38 @@ VIEWER_HTML = r"""<!doctype html>
 <script>
 (function () {
   "use strict";
+
+  // Wire format: https://github.com/modelcontextprotocol/ext-apps
+  //              /blob/main/specification/2026-01-26/apps.mdx
+  var PROTOCOL_VERSION = "2026-01-26";
+  var APP_INFO = { name: "docusky-viewer", version: "0.3.1", title: "DocuSky 網頁檢視" };
+  var INLINE_HEIGHT = 720;      // px asked of the host for the inline iframe
+  var DOCUSKY_PAGE_SIZE = 20;   // what webpage-open-3in1.php itself pages by
+
+  var nextId = 2;                 // id 1 is the ui/initialize request
+  var waiting = {};               // JSON-RPC id -> callback
+  var host = { capabilities: {}, context: {}, displayMode: "inline" };
+  var view = { base: null, page: 1, totalPages: null, pageable: false };
   var settled = false;
+
+  // Hosts sandbox this document, and sandbox flags are inherited by the nested
+  // docusky.org.tw frame. Without `allow-same-origin` that frame lives in an
+  // opaque origin, and DocuSky's results page then renders page 1 only -- every
+  // later page comes back blank (verified against docusky.org.tw, 2026-09-12).
+  // Storage throwing is the same signal, so probe it and, in that case, offer
+  // "open in browser" instead of a pager that would only produce blanks.
+  var strictSandbox = (function () {
+    try { window.localStorage.getItem("docusky-probe"); return false; }
+    catch (e) { return true; }
+  })();
+
+  function post(msg) { window.parent.postMessage(msg, "*"); }
+
+  function request(method, params, onResult) {
+    var id = nextId++;
+    if (onResult) waiting[id] = onResult;
+    post({ jsonrpc: "2.0", id: id, method: method, params: params });
+  }
 
   function showMessage(text, detail) {
     document.body.innerHTML = '<div id="root" class="msg"></div>';
@@ -125,36 +206,184 @@ VIEWER_HTML = r"""<!doctype html>
     }
   }
 
-  function showIframe(url) {
-    settled = true;
-    document.body.innerHTML = "";
-    var frame = document.createElement("iframe");
-    frame.id = "frame";
-    frame.src = url;
-    frame.title = "DocuSky";
-    frame.loading = "lazy";
-    document.body.appendChild(frame);
+  function applyTheme(context) {
+    document.body.classList.toggle("theme-dark", !!context && context.theme === "dark");
   }
 
-  function applyTheme(hostContext) {
-    if (hostContext && hostContext.theme === "dark") {
-      document.body.classList.add("theme-dark");
-    }
+  // --- URL helpers ------------------------------------------------------
+  // DocuSky's own paginator navigates the frame to the same page with
+  // `&page=N` appended (verified live), so page N is just a URL away.
+
+  function stripPage(url) {
+    return url
+      .replace(/[?&]page=\d+/g, function (m) { return m.charAt(0) === "?" ? "?" : ""; })
+      .replace(/\?&/, "?")
+      .replace(/[?&]$/, "");
   }
+
+  function pageUrl(url, page) {
+    if (page <= 1) return url;
+    return url + (url.indexOf("?") === -1 ? "?" : "&") + "page=" + page;
+  }
+
+  // --- rendering --------------------------------------------------------
+  //
+  // The toolbar is rebuilt on every state change, but the <iframe> element is
+  // created once and only ever has its `src` reassigned: rebuilding it would
+  // re-fetch a ~500 KB DocuSky page just to relabel a button.
+
+  var els = null;
+
+  function mount() {
+    document.body.innerHTML = "";
+
+    var bar = document.createElement("div");
+    bar.id = "bar";
+
+    var note = document.createElement("div");
+    note.id = "note";
+    note.textContent = strictSandbox
+      ? "這個用戶端把內嵌網頁鎖在最嚴格的沙箱裡，DocuSky 只有第一頁能正常顯示：要翻頁、篩選或點開單篇，"
+        + "請按「瀏覽器開啟」。"
+      : "提醒：DocuSky 頁面自己那排翻頁按鈕在內嵌視窗中會翻出空白頁（它靠的整頁跳轉在沙箱 iframe 裡不"
+        + "成立）；請改用上方工具列翻頁，或按「瀏覽器開啟」用完整功能。";
+
+    var frame = document.createElement("iframe");
+    frame.id = "frame";
+    frame.title = "DocuSky";
+    frame.className = "loading";
+    frame.addEventListener("load", function () {
+      frame.classList.remove("loading");
+      if (els) els.spin.hidden = true;
+    });
+
+    document.body.appendChild(bar);
+    document.body.appendChild(note);
+    document.body.appendChild(frame);
+    els = { bar: bar, note: note, frame: frame, spin: null };
+    renderBar();
+    note.hidden = !view.pageable;
+    load(view.page, true);
+  }
+
+  function renderBar() {
+    if (!els) return;
+    var bar = els.bar;
+    bar.innerHTML = "";
+
+    var label = document.createElement("span");
+    label.id = "label";
+    label.textContent = view.label || "DocuSky";
+    bar.appendChild(label);
+
+    var spin = document.createElement("span");
+    spin.id = "spin";
+    spin.textContent = "載入中…";
+    spin.hidden = !els.frame.classList.contains("loading");
+    bar.appendChild(spin);
+    els.spin = spin;
+
+    if (view.pageable && !strictSandbox) bar.appendChild(buildPager());
+
+    var spacer = document.createElement("span");
+    spacer.className = "spacer";
+    bar.appendChild(spacer);
+
+    if ((host.context.availableDisplayModes || []).indexOf("fullscreen") !== -1) {
+      bar.appendChild(button(host.displayMode === "fullscreen" ? "⤡ 結束全螢幕" : "⤢ 全螢幕", function () {
+        var mode = host.displayMode === "fullscreen" ? "inline" : "fullscreen";
+        request("ui/request-display-mode", { mode: mode }, function (result) {
+          if (result && result.mode) { host.displayMode = result.mode; renderBar(); }
+        });
+      }));
+    }
+    if (host.capabilities.openLinks) {
+      bar.appendChild(button("↗ 瀏覽器開啟", function () {
+        request("ui/open-link", { url: pageUrl(view.base, view.page) });
+      }));
+    }
+    bar.appendChild(button("⟳", function () { load(view.page, true); }, "重新載入"));
+  }
+
+  function button(text, onClick, title) {
+    var el = document.createElement("button");
+    el.textContent = text;
+    if (title) el.title = title;
+    el.addEventListener("click", onClick);
+    return el;
+  }
+
+  function buildPager() {
+    var wrap = document.createElement("span");
+    wrap.id = "pager";
+
+    var prev = button("‹ 上一頁", function () { load(view.page - 1); });
+    prev.disabled = view.page <= 1;
+    wrap.appendChild(prev);
+
+    var info = document.createElement("span");
+    info.textContent = view.totalPages
+      ? "第 " + view.page + " / " + view.totalPages + " 頁"
+      : "第 " + view.page + " 頁";
+    wrap.appendChild(info);
+
+    var next = button("下一頁 ›", function () { load(view.page + 1); });
+    next.disabled = !!view.totalPages && view.page >= view.totalPages;
+    wrap.appendChild(next);
+
+    var jump = document.createElement("input");
+    jump.id = "jump";
+    jump.type = "number";
+    jump.min = "1";
+    if (view.totalPages) jump.max = String(view.totalPages);
+    jump.placeholder = "頁";
+    jump.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") load(parseInt(jump.value, 10));
+    });
+    wrap.appendChild(jump);
+    wrap.appendChild(button("跳頁", function () { load(parseInt(jump.value, 10)); }));
+    return wrap;
+  }
+
+  function load(page, force) {
+    if (!page || page < 1) page = 1;
+    if (view.totalPages && page > view.totalPages) page = view.totalPages;
+    if (!force && page === view.page && els) return;
+    view.page = page;
+    els.frame.classList.add("loading");
+    els.frame.src = pageUrl(view.base, view.page);
+    renderBar();
+  }
+
+  // --- tool result ------------------------------------------------------
 
   function handleToolResult(params) {
     settled = true;
     var content = (params && params.content) || [];
+    var data = (params && params.structuredContent) || null;
     var textBlock = null;
     for (var i = 0; i < content.length; i++) {
       if (content[i] && content[i].type === "text") { textBlock = content[i]; break; }
     }
-    var data = null;
-    if (textBlock) {
+    if (!data && textBlock) {
       try { data = JSON.parse(textBlock.text); } catch (e) { /* not JSON, ignore */ }
     }
+    // The SDK may hand structured output back wrapped in a single "result" key.
+    if (data && typeof data.result === "string" && !data.webUrl) {
+      try { data = JSON.parse(data.result); } catch (e) { /* keep what we have */ }
+    }
+
     if (data && data.webUrl) {
-      showIframe(data.webUrl);
+      view.base = stripPage(data.webUrl);
+      view.page = 1;
+      view.pageable = data.webUrl.indexOf("webpage-open-3in1.php") !== -1;
+      view.totalPages = data.totalFound
+        ? Math.max(1, Math.ceil(Number(data.totalFound) / DOCUSKY_PAGE_SIZE))
+        : null;
+      view.label = [data.db, data.corpus && data.corpus !== data.db ? data.corpus : null,
+                    data.query, data.totalFound ? data.totalFound + " 筆" : null]
+        .filter(Boolean).join(" · ");
+      mount();
     } else if (data && data.error) {
       showMessage("DocuSky 回傳了錯誤：", data.error);
     } else {
@@ -165,18 +394,48 @@ VIEWER_HTML = r"""<!doctype html>
     }
   }
 
-  function post(msg) {
-    window.parent.postMessage(msg, "*");
-  }
+  // --- host channel -----------------------------------------------------
 
   window.addEventListener("message", function (event) {
     var msg = event.data;
     if (!msg || msg.jsonrpc !== "2.0") return;
-    if (msg.id === 1 && msg.result) {
-      applyTheme(msg.result.hostContext);
-      post({ jsonrpc: "2.0", method: "ui/notifications/initialized" });
-    } else if (msg.method === "ui/notifications/tool-result") {
+
+    if (msg.id === 1) {
+      if (msg.error) {
+        showMessage("這個 MCP 用戶端拒絕了 MCP Apps 交握：", JSON.stringify(msg.error));
+        settled = true;
+        return;
+      }
+      var result = msg.result || {};
+      host.capabilities = result.hostCapabilities || {};
+      host.context = result.hostContext || {};
+      host.displayMode = host.context.displayMode || "inline";
+      applyTheme(host.context);
+      post({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
+      // Ask for room: a retrieval page in a 200px-tall strip is unusable.
+      post({
+        jsonrpc: "2.0",
+        method: "ui/notifications/size-changed",
+        params: { height: INLINE_HEIGHT }
+      });
+      return;
+    }
+
+    if (msg.id && waiting[msg.id]) {
+      var cb = waiting[msg.id];
+      delete waiting[msg.id];
+      if (!msg.error) cb(msg.result);
+      return;
+    }
+
+    if (msg.method === "ui/notifications/tool-result") {
       handleToolResult(msg.params);
+    } else if (msg.method === "ui/notifications/host-context-changed") {
+      var ctx = msg.params || {};
+      Object.keys(ctx).forEach(function (k) { host.context[k] = ctx[k]; });
+      if (ctx.displayMode) host.displayMode = ctx.displayMode;
+      applyTheme(host.context);
+      if (view.base) renderBar();
     }
   });
 
@@ -184,7 +443,11 @@ VIEWER_HTML = r"""<!doctype html>
     jsonrpc: "2.0",
     id: 1,
     method: "ui/initialize",
-    params: { appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] } }
+    params: {
+      appInfo: APP_INFO,
+      appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
+      protocolVersion: PROTOCOL_VERSION
+    }
   });
 
   setTimeout(function () {

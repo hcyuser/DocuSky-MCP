@@ -604,7 +604,7 @@ if apps is not None:
 mcp = _Server(
     "docusky",
     instructions=INSTRUCTIONS,
-    version="0.3.0",
+    version="0.3.1",
     extensions=[apps] if apps is not None else None,
 )
 

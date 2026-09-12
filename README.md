@@ -132,7 +132,15 @@
 
 ### 內嵌顯示 DocuSky 網頁
 
-在支援 **MCP Apps** 的 Claude 版本裡，查公開資料庫時（全文檢索、分布統計、標記分析）以及畫文字雲時，Claude 的回覆旁邊會直接內嵌顯示 DocuSky 官方網頁本身的畫面，不只是文字結果。查詢類的內嵌只在**公開資料庫**（不需帳密）上生效——私人資料庫的登入狀態是伺服器端的，內嵌畫面沒辦法一起帶過去，所以私人查詢仍然只會拿到文字結果。文字雲不受這個限制：它畫的是已經拿到手的數字，資料從哪個資料庫來都可以。如果你用的 Claude 版本不支援 MCP Apps，這一切照常運作，只是不會出現內嵌畫面。
+在支援 **MCP Apps** 的 Claude 版本裡，查公開資料庫時（全文檢索、分布統計、標記分析）以及畫文字雲時，Claude 的回覆旁邊會直接內嵌顯示 DocuSky 官方網頁本身的畫面，不只是文字結果。畫面上方有一排這個擴充自己加的工具列：
+
+- **上一頁／下一頁／跳頁** —— 直接翻 DocuSky 的檢索結果。**請用這排按鈕翻頁**，不要用 DocuSky 頁面自己那排頁碼：它靠整頁跳轉（`window.location.href`）換頁，而那在對話內嵌的沙箱 iframe 裡會翻出空白頁。
+- **全螢幕** —— 把內嵌畫面放大成整頁再看，關掉就回到對話裡。
+- **瀏覽器開啟** —— 在真正的瀏覽器打開同一頁，DocuSky 的全部功能（篩選、標記統計、匯出、另開單篇）都在那裡。
+
+查詢類的內嵌只在**公開資料庫**（不需帳密）上生效——私人資料庫的登入狀態是伺服器端的，內嵌畫面沒辦法一起帶過去，所以私人查詢仍然只會拿到文字結果。文字雲不受這個限制：它畫的是已經拿到手的數字，資料從哪個資料庫來都可以。如果你用的 Claude 版本不支援 MCP Apps，這一切照常運作，只是不會出現內嵌畫面。
+
+少數 client 會用最嚴格的沙箱（沒有 `allow-same-origin`）來跑內嵌畫面，那種環境下 DocuSky 只有第一頁能正常顯示。擴充會自己偵測到並改成提示你按「瀏覽器開啟」，不會給你一排按了只會變空白的翻頁鈕。
 
 ---
 
@@ -318,6 +326,21 @@ postMessage 協定的小型 `ui://` 資源嵌成 iframe 顯示；不支援的 cl
 就只是多一個可以忽略或當連結用的欄位，行為與加這個功能前完全一樣。`word_cloud`
 回傳的 `webUrl` 走的是同一個 `ui://` 資源與同一條 CSP（`frameDomains`
 已經涵蓋 `docusky.org.tw`）。
+
+手刻那份 postMessage 有三個地方是照著 ext-apps 的 schema 與實測結果來的
+（都寫在 `docusky_mcp/ui.py` 的模組 docstring 裡）：
+
+- `ui/initialize` 的 params **三個欄位都是必填**：`appInfo`、`appCapabilities`、
+  `protocolVersion`。0.3.0 只送了 `appCapabilities`，會驗證 params 的 host
+  會直接擋掉交握，結果就是什麼都不顯示——0.3.1 修好了這點。
+- DocuSky 內建的頁碼是整頁跳轉，在沙箱 iframe 裡會翻成空白，所以翻頁改成由
+  工具列把 `&page=N` 直接設進 iframe 的 `src`（這條路實測可行）。
+- 內嵌畫面預設高度太矮，所以會用 `ui/notifications/size-changed` 要 720px，
+  並用 `ui/request-display-mode` 提供全螢幕切換。
+
+驗證方式是照 ext-apps 的 `examples/basic-host`（外層 proxy iframe + 內層
+sandbox iframe 的雙層架構）架一個假 host，對真正的 docusky.org.tw 跑過
+`allow-scripts allow-same-origin allow-forms` 與只有 `allow-scripts` 兩種沙箱。
 `target="USER"` 時 `webUrl` 會是 `null`——DocuSky 用伺服器端的 session
 cookie 認證私人資料庫，內嵌用的瀏覽器分頁沒有那個 cookie，硬塞連結只會顯示
 「未登入」，所以私人查詢乾脆不給這個欄位。

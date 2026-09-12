@@ -1,9 +1,15 @@
 """MCP Apps (interactive UI) support for the DocuSky MCP server.
 
-Wires `search_documents`, `post_classification`, `tag_analysis` and
-`word_cloud` to a `ui://` resource so hosts that support the MCP Apps
-extension (https://modelcontextprotocol.io/extensions/apps/overview) render
-DocuSky's own web page inline, in a sandboxed iframe, instead of only text.
+Wires `search_documents`, `post_classification`, `tag_analysis`,
+`word_cloud` and `docugis_map` to a `ui://` resource so hosts that support the
+MCP Apps extension (https://modelcontextprotocol.io/extensions/apps/overview)
+render DocuSky's own web page inline, in a sandboxed iframe, instead of only
+text.
+
+There are two such resources. `VIEWER_HTML` embeds a DocuSky page that already
+holds the data (a query result, a chart). `DOCUGIS_HTML` is for DocuGIS2,
+which cannot be handed data through its URL at all: it embeds the empty tool
+next to the TSV this server built, with a copy button, and the user pastes.
 
 How it works
 ------------
@@ -86,6 +92,7 @@ plus an inner `sandbox`ed iframe) against the real docusky.org.tw:
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 from urllib.parse import urlencode
 
@@ -594,3 +601,610 @@ def _normalize_terms(terms: dict[str, float] | list[Any]) -> list[tuple[Any, Any
 def _encode_wordcloud_url(used: list[dict[str, Any]]) -> str:
     data = ";".join(f"{item['name']},{item['plotted']}" for item in used)
     return f"{WORDCLOUD_PAGE}?{urlencode({'data': data})}"
+
+
+# ---------------------------------------------------------------------------
+# DocuGIS2 (https://docusky.org.tw/DocuSky/docuTools/DocuGIS2/)
+#
+# Unlike WordCloudLite, DocuGIS2 cannot be handed its data in a URL. All 56 of
+# its scripts were read on 2026-09-12: not one parses `location.search` or
+# `URLSearchParams`, and it registers no `message` listener, so a sandboxed
+# iframe can neither pass it a payload nor call into it. What it does have is a
+# paste box -- drop TSV into `#tsv`, press 匯入, and the rows land on the map --
+# so this module builds the TSV and `DOCUGIS_HTML` puts a copy button next to
+# the embedded tool. (It does honour one URL form, `index.html?f=<id>`, which
+# pulls a dataset out of the registry file `gis/public/db.json`; publishing to
+# that means writing into a shared community account and making the data public,
+# so it is deliberately not used here.)
+#
+# What its importer accepts, measured live on 2026-09-12 by pasting TSV and
+# reading back its grid:
+#
+# * A header row of `id name x y date text`, tab separated. `x` is WGS84
+#   longitude and `y` latitude (the grid renames them lng/lat on import).
+#   Columns beyond those six survive the import and show up in the popup.
+# * The `date` column is unforgiving, and per row: `1887-01`, `1887-01-01`,
+#   `1887/1/1`, `18870101`, even `-0200-01-01` (BCE) all import, but a bare
+#   year (`1887`) or an empty cell makes the importer DROP that row, with a
+#   single "Ignore incorrect data and continue loading correct data!" alert for
+#   the whole file. Leave the `date` column out altogether, though, and every
+#   row imports. Hence `include_dates` below: a bare year is padded to
+#   `YYYY-01` rather than passed through, and a half-dated set drops the column
+#   instead of silently losing the undated rows.
+# ---------------------------------------------------------------------------
+
+DOCUGIS_PAGE = "https://docusky.org.tw/DocuSky/docuTools/DocuGIS2/"
+DOCUGIS_RESOURCE_URI = "ui://docusky/docugis.html"
+DOCUGIS_MAX_ROWS = 2000
+
+_DOCUGIS_CORE_COLUMNS = ("id", "name", "x", "y", "date", "text")
+_DOCUGIS_ALIASES = {
+    "id": ("id", "no", "num", "number", "seq", "序號", "編號"),
+    "name": ("name", "place", "placename", "location", "title", "label",
+             "地名", "名稱", "地點", "標題"),
+    "x": ("x", "lon", "lng", "long", "longitude", "經度"),
+    "y": ("y", "lat", "latitude", "緯度"),
+    "date": ("date", "time", "year", "when", "日期", "時間", "年代", "年份"),
+    "text": ("text", "desc", "description", "note", "content", "summary",
+             "描述", "說明", "內容", "備註"),
+}
+_ALIAS_LOOKUP = {
+    alias: canonical
+    for canonical, aliases in _DOCUGIS_ALIASES.items()
+    for alias in aliases
+}
+
+_YEAR_ONLY_RE = re.compile(r"^(-?)(\d{1,4})$")
+_DATE_OK_RE = re.compile(r"^-?\d{1,4}[-/]\d{1,2}([-/]\d{1,2})?$|^\d{8}$")
+
+
+def build_docugis_tsv(
+    rows: list[Any] | dict[str, Any] | str,
+    include_dates: bool | None = None,
+    max_rows: int = DOCUGIS_MAX_ROWS,
+) -> tuple[str, list[dict[str, Any]], list[str], list[dict[str, Any]]]:
+    """Turn place rows into TSV that DocuGIS2's paste box will import.
+
+    Returns (tsv, rows actually included, notes about anything adjusted,
+    rows that were left out and why). Raises ValueError when nothing is usable.
+    """
+    records = _normalize_rows(rows)
+    notes: list[str] = []
+    skipped: list[dict[str, Any]] = []
+    used: list[dict[str, Any]] = []
+    extra_columns: list[str] = []
+    flattened = swapped = padded_years = 0
+
+    for position, record in enumerate(records, start=1):
+        row = _canonical_row(record)
+        name, hit = _flatten_cell(row.get("name"))
+        flattened += hit
+        if not name:
+            skipped.append({"row": position, "reason": "沒有地名 (name)"})
+            continue
+        try:
+            x = float(str(row.get("x", "")).strip())
+            y = float(str(row.get("y", "")).strip())
+        except (TypeError, ValueError):
+            skipped.append({"row": position, "name": name, "reason": "x／y 不是數字"})
+            continue
+        # A lat/lon swap is the one coordinate mistake that is unambiguous:
+        # latitude cannot exceed 90, so a y past that with a valid-looking x is
+        # a swap, not a real point.
+        if abs(y) > 90 and abs(x) <= 90:
+            x, y = y, x
+            swapped += 1
+        if not (-180 <= x <= 180 and -90 <= y <= 90):
+            skipped.append(
+                {"row": position, "name": name, "reason": f"座標超出範圍 (x={x}, y={y})"}
+            )
+            continue
+
+        date, date_state = _docugis_date(row.get("date"))
+        if date_state == "padded":
+            padded_years += 1
+        elif date_state == "unusable":
+            skipped_date = _flatten_cell(row.get("date"))[0]
+            notes.append(f"第 {position} 列的日期「{skipped_date}」DocuGIS2 看不懂，已當成無日期。")
+
+        entry: dict[str, Any] = {
+            "id": _flatten_cell(row.get("id"))[0] or str(position),
+            "name": name,
+            "x": x,
+            "y": y,
+        }
+        if date:
+            entry["date"] = date
+        text, hit = _flatten_cell(row.get("text"))
+        flattened += hit
+        if text:
+            entry["text"] = text
+        for key, value in row.items():
+            if key in _DOCUGIS_CORE_COLUMNS:
+                continue
+            cell, hit = _flatten_cell(value)
+            flattened += hit
+            if not cell:
+                continue
+            column, hit = _flatten_cell(key)
+            flattened += hit
+            if column not in extra_columns:
+                extra_columns.append(column)
+            entry[column] = cell
+        used.append(entry)
+
+    if not used:
+        raise ValueError(
+            "No usable rows: each needs a name and numeric WGS84 coordinates "
+            "(x = longitude, y = latitude)."
+        )
+    if skipped:
+        notes.append(f"{len(skipped)} 列資料不完整，沒有放進 TSV（見 skipped）。")
+    if swapped:
+        notes.append(f"{swapped} 列的 x／y 顛倒了（緯度不可能超過 90），已對調。")
+    if padded_years:
+        notes.append(
+            f"{padded_years} 列只給了年份。DocuGIS2 不吃純年份，會整列丟掉，"
+            "所以補成該年 1 月（YYYY-01）。"
+        )
+    if max_rows > 0 and len(used) > max_rows:
+        notes.append(f"只保留前 {max_rows} 列，共 {len(used)} 列。")
+        used = used[:max_rows]
+
+    dated = sum(1 for row in used if row.get("date"))
+    if include_dates is None:
+        # Auto: never trade rows for a timeline behind the user's back.
+        use_dates = dated == len(used) and dated > 0
+        if 0 < dated < len(used):
+            notes.append(
+                f"{len(used) - dated} 列沒有日期。DocuGIS2 只要 date 欄有空值就會整列丟掉，"
+                "所以這次不輸出 date 欄（地圖完整，但沒有時間軸）。"
+                "要時間軸請用 include_dates=true，代價是那幾列不會出現。"
+            )
+    else:
+        use_dates = bool(include_dates)
+        if use_dates and dated < len(used):
+            notes.append(
+                f"include_dates=true：{len(used) - dated} 列沒有日期，DocuGIS2 匯入時會丟掉它們"
+                "（它只會跳一次「Ignore incorrect data」提示）。"
+            )
+        elif not use_dates and dated:
+            notes.append("include_dates=false：日期已從 TSV 移除，時間軸不會有資料。")
+    if not use_dates:
+        for row in used:
+            row.pop("date", None)
+    if flattened:
+        notes.append(f"{flattened} 個欄位裡的換行或 Tab 已換成空白（TSV 一列一筆）。")
+
+    columns = ["id", "name", "x", "y"]
+    if use_dates:
+        columns.append("date")
+    if any(row.get("text") for row in used):
+        columns.append("text")
+    columns.extend(extra_columns)
+    return _encode_docugis_tsv(columns, used), used, notes, skipped
+
+
+def _normalize_rows(rows: list[Any] | dict[str, Any] | str) -> list[dict[str, Any]]:
+    """Flatten the shapes a caller might send into per-place dicts."""
+    if isinstance(rows, str):
+        rows = json.loads(rows)
+    if isinstance(rows, dict):
+        # {"臺北": {"x": ..., "y": ...}, ...}
+        out = []
+        for name, value in rows.items():
+            record = dict(value) if isinstance(value, dict) else {"x": value}
+            record.setdefault("name", name)
+            out.append(record)
+        return out
+    normalized: list[dict[str, Any]] = []
+    for item in rows or []:
+        if isinstance(item, dict):
+            normalized.append(item)
+        elif isinstance(item, (list, tuple)) and len(item) >= 3:
+            keys = ("name", "x", "y", "date", "text")
+            normalized.append(dict(zip(keys, item)))
+        else:
+            raise ValueError(f"Cannot read a place row from: {item!r}")
+    if not normalized:
+        raise ValueError("No rows given: each needs a name and WGS84 x/y coordinates.")
+    return normalized
+
+
+def _canonical_row(record: dict[str, Any]) -> dict[str, Any]:
+    """Rename known column aliases (lng -> x, 地名 -> name, ...), keep the rest."""
+    out: dict[str, Any] = {}
+    for key, value in record.items():
+        label = str(key).strip()
+        canonical = _ALIAS_LOOKUP.get(label.lower().replace("_", "").replace(" ", ""))
+        if canonical:
+            out.setdefault(canonical, value)
+        elif label:
+            out.setdefault(label, value)
+    return out
+
+
+def _flatten_cell(value: Any) -> tuple[str, int]:
+    """Squeeze a value onto one TSV line; also report whether that changed it."""
+    if value is None:
+        return "", 0
+    text = str(value)
+    hit = 1 if ("\t" in text or "\n" in text or "\r" in text) else 0
+    return " ".join(text.split()), hit
+
+
+def _docugis_date(value: Any) -> tuple[str | None, str | None]:
+    """Normalize a date to something DocuGIS2's importer accepts, or None."""
+    text = _flatten_cell(value)[0]
+    if not text:
+        return None, None
+    year_only = _YEAR_ONLY_RE.match(text)
+    if year_only:
+        sign, digits = year_only.groups()
+        return f"{sign}{int(digits):04d}-01", "padded"
+    if _DATE_OK_RE.match(text):
+        return text, None
+    return None, "unusable"
+
+
+def _coord(value: float) -> str:
+    """Six decimals is ~0.1 m; trim the zeros that adds to round numbers."""
+    return f"{value:.6f}".rstrip("0").rstrip(".") or "0"
+
+
+def _encode_docugis_tsv(columns: list[str], used: list[dict[str, Any]]) -> str:
+    lines = ["\t".join(columns)]
+    for row in used:
+        cells = []
+        for column in columns:
+            value = row.get(column, "")
+            cells.append(_coord(value) if column in ("x", "y") else str(value))
+        lines.append("\t".join(cells))
+    return "\n".join(lines)
+
+
+# The DocuGIS2 viewer. Same MCP Apps handshake as VIEWER_HTML above, but the
+# page it embeds starts empty: the data travels through the user's clipboard,
+# so the TSV sits above the frame with a copy button and three steps.
+#
+# It also refuses to embed DocuGIS2 under a strict sandbox. Measured 2026-09-12
+# with the two sandboxes side by side against the real page: with
+# `allow-same-origin` DocuGIS2 loads normally, without it the page never gets
+# past its loading spinner (an opaque origin makes its storage calls throw).
+# A frame stuck on a spinner is worse than no frame, so that case shows the TSV
+# and an "open in browser" button instead.
+#
+# Two more things the embedded page does differently, both seen 2026-09-12 in a
+# replay of the reference host and reflected in the steps the viewer prints:
+# it starts with its left menu collapsed (a real browser tab opens with the menu
+# out), so the first step is the ⇥ button at the map's top-left; and it comes up
+# in English, hence the bilingual button names.
+DOCUGIS_HTML = r"""<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DocuGIS2 地圖</title>
+<style>
+  :root { color-scheme: light dark; --fg: #1a1a1a; --bg: #fff; --bar: #f3f4f6; --line: #d8dade; }
+  body.theme-dark { --fg: #e6e6e6; --bg: #1e1e1e; --bar: #2a2b2e; --line: #3a3b3f; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; flex-direction: column; background: var(--bg); color: var(--fg);
+    font: 13px/1.5 -apple-system, "Segoe UI", "PingFang TC", "Microsoft JhengHei", sans-serif;
+  }
+  #bar {
+    display: flex; align-items: center; gap: 6px; flex: 0 0 auto; flex-wrap: wrap;
+    padding: 5px 8px; background: var(--bar); border-bottom: 1px solid var(--line);
+    font-size: 12px;
+  }
+  #label { opacity: 0.8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
+  .spacer { flex: 1 1 auto; }
+  button {
+    font: inherit; color: inherit; background: transparent;
+    border: 1px solid var(--line); border-radius: 5px; padding: 2px 8px; cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: rgba(127, 127, 127, 0.16); }
+  button.primary { border-color: #3b6fd4; color: #3b6fd4; font-weight: 600; }
+  #steps { flex: 0 0 auto; padding: 4px 10px; font-size: 11px; opacity: 0.8;
+           background: var(--bar); border-bottom: 1px solid var(--line); }
+  #notes { flex: 0 0 auto; padding: 0 10px 4px; font-size: 11px; opacity: 0.8;
+           background: var(--bar); border-bottom: 1px solid var(--line); }
+  #notes ul { margin: 4px 0 0; padding-left: 18px; }
+  #tsv {
+    flex: 0 0 auto; width: 100%; box-sizing: border-box; height: 96px; resize: vertical;
+    border: 0; border-bottom: 1px solid var(--line); padding: 6px 10px; background: var(--bg);
+    color: var(--fg); white-space: pre; overflow: auto; tab-size: 12;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, "Cascadia Mono", monospace;
+  }
+  #frame { flex: 1 1 auto; border: 0; width: 100%; min-height: 320px; background: #fff; }
+  .msg { margin: auto; padding: 24px; text-align: center; max-width: 34em; }
+  .msg code { display: block; margin-top: 8px; white-space: pre-wrap; word-break: break-all;
+              opacity: 0.75; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="root" class="msg">正在準備 DocuGIS2…</div>
+<script>
+(function () {
+  "use strict";
+
+  // Wire format: https://github.com/modelcontextprotocol/ext-apps
+  //              /blob/main/specification/2026-01-26/apps.mdx
+  var PROTOCOL_VERSION = "2026-01-26";
+  var APP_INFO = { name: "docusky-docugis", version: "0.4.0", title: "DocuGIS2 地圖" };
+  var INLINE_HEIGHT = 760;
+
+  var nextId = 2;                 // id 1 is the ui/initialize request
+  var waiting = {};               // JSON-RPC id -> callback
+  var host = { capabilities: {}, context: {}, displayMode: "inline" };
+  var state = { tsv: "", label: "DocuGIS2", notes: [], url: null };
+  var els = null;
+  var settled = false;
+
+  // Sandbox flags are inherited by the nested docusky.org.tw frame. Without
+  // `allow-same-origin` that frame lives in an opaque origin, where DocuGIS2
+  // hangs on its loading spinner forever (verified 2026-09-12). Storage
+  // throwing is the same signal, so probe it and skip the embed in that case.
+  var strictSandbox = (function () {
+    try { window.localStorage.getItem("docusky-probe"); return false; }
+    catch (e) { return true; }
+  })();
+
+  function post(msg) { window.parent.postMessage(msg, "*"); }
+
+  function request(method, params, onResult) {
+    var id = nextId++;
+    if (onResult) waiting[id] = onResult;
+    post({ jsonrpc: "2.0", id: id, method: method, params: params });
+  }
+
+  function showMessage(text, detail) {
+    document.body.innerHTML = '<div id="root" class="msg"></div>';
+    var root = document.getElementById("root");
+    root.appendChild(document.createTextNode(text));
+    if (detail) {
+      var code = document.createElement("code");
+      code.textContent = detail;
+      root.appendChild(code);
+    }
+  }
+
+  function applyTheme(context) {
+    document.body.classList.toggle("theme-dark", !!context && context.theme === "dark");
+  }
+
+  function button(text, onClick, title) {
+    var el = document.createElement("button");
+    el.textContent = text;
+    if (title) el.title = title;
+    el.addEventListener("click", onClick);
+    return el;
+  }
+
+  // --- clipboard --------------------------------------------------------
+  // A sandboxed iframe often has neither the async clipboard API nor the
+  // clipboard-write permission, so fall back to execCommand and, failing that,
+  // leave the TSV selected and let the user press the shortcut themselves.
+
+  function copyTsv() {
+    var done = function (ok) {
+      els.copy.textContent = ok ? "✓ 已複製，去下面貼上" : "請按 ⌘C／Ctrl+C 複製";
+      setTimeout(function () { els.copy.textContent = "⧉ 複製 TSV"; }, 4000);
+    };
+    els.tsv.focus();
+    els.tsv.select();
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(state.tsv).then(function () { done(true); },
+                                                    function () { done(execCopy()); });
+      return;
+    }
+    done(execCopy());
+  }
+
+  function execCopy() {
+    try { return document.execCommand("copy"); } catch (e) { return false; }
+  }
+
+  // --- rendering --------------------------------------------------------
+
+  function mount() {
+    document.body.innerHTML = "";
+
+    var bar = document.createElement("div");
+    bar.id = "bar";
+
+    var steps = document.createElement("div");
+    steps.id = "steps";
+    steps.textContent = strictSandbox
+      ? "這個用戶端把內嵌網頁鎖在最嚴格的沙箱裡，DocuGIS2 在裡面載不起來。"
+        + "請按「瀏覽器開啟 DocuGIS2」，複製下面的 TSV，在左側選單點「匯入資料 Import Data」，"
+        + "貼到右邊的貼上框，再按［匯入 Import］。"
+      : "① 按上方「複製 TSV」 → ② 下方 DocuGIS2 按地圖左上角的 ⇥ 打開選單（內嵌時預設是收起來的），"
+        + "點「1.2 匯入資料 Import Data」 → ③ 在右邊的貼上框按 ⌘V／Ctrl+V 貼上，"
+        + "按［匯入 Import］，地點就會出現在地圖上。";
+
+    var tsv = document.createElement("textarea");
+    tsv.id = "tsv";
+    tsv.readOnly = true;
+    tsv.spellcheck = false;
+    tsv.value = state.tsv;
+    tsv.title = "DocuGIS2 匯入用的 TSV";
+    // With no frame below it, the TSV is the only thing on the page: let it
+    // have the room instead of leaving a blank half.
+    if (strictSandbox) tsv.style.flex = "1 1 auto";
+
+    document.body.appendChild(bar);
+    document.body.appendChild(steps);
+    if (state.notes.length) document.body.appendChild(buildNotes());
+    document.body.appendChild(tsv);
+
+    var frame = null;
+    if (!strictSandbox) {
+      frame = document.createElement("iframe");
+      frame.id = "frame";
+      frame.title = "DocuGIS2";
+      frame.src = state.url;
+      document.body.appendChild(frame);
+    }
+
+    els = { bar: bar, tsv: tsv, frame: frame, copy: null };
+    renderBar();
+  }
+
+  function buildNotes() {
+    var box = document.createElement("details");
+    box.id = "notes";
+    var head = document.createElement("summary");
+    head.textContent = "整理資料時做了 " + state.notes.length + " 項調整";
+    box.appendChild(head);
+    var list = document.createElement("ul");
+    state.notes.forEach(function (note) {
+      var item = document.createElement("li");
+      item.textContent = note;
+      list.appendChild(item);
+    });
+    box.appendChild(list);
+    return box;
+  }
+
+  function renderBar() {
+    if (!els) return;
+    var bar = els.bar;
+    bar.innerHTML = "";
+
+    var label = document.createElement("span");
+    label.id = "label";
+    label.textContent = state.label;
+    bar.appendChild(label);
+
+    els.copy = button("⧉ 複製 TSV", copyTsv);
+    els.copy.className = "primary";
+    bar.appendChild(els.copy);
+
+    var spacer = document.createElement("span");
+    spacer.className = "spacer";
+    bar.appendChild(spacer);
+
+    if (!strictSandbox
+        && (host.context.availableDisplayModes || []).indexOf("fullscreen") !== -1) {
+      bar.appendChild(button(host.displayMode === "fullscreen" ? "⤡ 結束全螢幕" : "⤢ 全螢幕",
+        function () {
+          var mode = host.displayMode === "fullscreen" ? "inline" : "fullscreen";
+          request("ui/request-display-mode", { mode: mode }, function (result) {
+            if (result && result.mode) { host.displayMode = result.mode; renderBar(); }
+          });
+        }));
+    }
+    if (host.capabilities.openLinks) {
+      bar.appendChild(button("↗ 瀏覽器開啟 DocuGIS2", function () {
+        request("ui/open-link", { url: state.url });
+      }));
+    }
+    if (els.frame) {
+      bar.appendChild(button("⟳", function () {
+        els.frame.src = state.url;
+      }, "重新載入 DocuGIS2（會清掉已匯入的資料）"));
+    }
+  }
+
+  // --- tool result ------------------------------------------------------
+
+  function handleToolResult(params) {
+    settled = true;
+    var content = (params && params.content) || [];
+    var data = (params && params.structuredContent) || null;
+    var textBlock = null;
+    for (var i = 0; i < content.length; i++) {
+      if (content[i] && content[i].type === "text") { textBlock = content[i]; break; }
+    }
+    if (!data && textBlock) {
+      try { data = JSON.parse(textBlock.text); } catch (e) { /* not JSON, ignore */ }
+    }
+    // The SDK may hand structured output back wrapped in a single "result" key.
+    if (data && typeof data.result === "string" && !data.tsv) {
+      try { data = JSON.parse(data.result); } catch (e) { /* keep what we have */ }
+    }
+
+    if (data && data.tsv) {
+      state.tsv = data.tsv;
+      state.notes = data.notes || [];
+      state.url = data.webUrl || "https://docusky.org.tw/DocuSky/docuTools/DocuGIS2/";
+      state.label = [data.title, data.rowCount ? data.rowCount + " 個地點" : null]
+        .filter(Boolean).join(" · ") || "DocuGIS2";
+      mount();
+    } else if (data && data.error) {
+      showMessage("沒有可以上圖的資料：", data.error);
+    } else {
+      showMessage(
+        "這次沒有拿到可匯入 DocuGIS2 的 TSV。",
+        textBlock ? String(textBlock.text).slice(0, 500) : null
+      );
+    }
+  }
+
+  // --- host channel -----------------------------------------------------
+
+  window.addEventListener("message", function (event) {
+    var msg = event.data;
+    if (!msg || msg.jsonrpc !== "2.0") return;
+
+    if (msg.id === 1) {
+      if (msg.error) {
+        showMessage("這個 MCP 用戶端拒絕了 MCP Apps 交握：", JSON.stringify(msg.error));
+        settled = true;
+        return;
+      }
+      var result = msg.result || {};
+      host.capabilities = result.hostCapabilities || {};
+      host.context = result.hostContext || {};
+      host.displayMode = host.context.displayMode || "inline";
+      applyTheme(host.context);
+      post({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
+      post({
+        jsonrpc: "2.0",
+        method: "ui/notifications/size-changed",
+        params: { height: INLINE_HEIGHT }
+      });
+      return;
+    }
+
+    if (msg.id && waiting[msg.id]) {
+      var cb = waiting[msg.id];
+      delete waiting[msg.id];
+      if (!msg.error) cb(msg.result);
+      return;
+    }
+
+    if (msg.method === "ui/notifications/tool-result") {
+      handleToolResult(msg.params);
+    } else if (msg.method === "ui/notifications/host-context-changed") {
+      var ctx = msg.params || {};
+      Object.keys(ctx).forEach(function (k) { host.context[k] = ctx[k]; });
+      if (ctx.displayMode) host.displayMode = ctx.displayMode;
+      applyTheme(host.context);
+      if (els) renderBar();
+    }
+  });
+
+  post({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "ui/initialize",
+    params: {
+      appInfo: APP_INFO,
+      appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
+      protocolVersion: PROTOCOL_VERSION
+    }
+  });
+
+  setTimeout(function () {
+    if (!settled) {
+      showMessage("尚未收到資料。這個 MCP 用戶端可能不支援 MCP Apps 內嵌顯示。");
+    }
+  }, 8000);
+})();
+</script>
+</body>
+</html>
+"""

@@ -37,9 +37,14 @@ except ImportError:  # Older SDK: the tools below still work, just as plain text
 from .client import DocuSkyClient, DocuSkyError, strip_xml
 from .credentials import credentials_path, load_credentials
 from .ui import (
+    DOCUGIS_HTML,
+    DOCUGIS_MAX_ROWS,
+    DOCUGIS_PAGE,
+    DOCUGIS_RESOURCE_URI,
     VIEWER_HTML,
     VIEWER_RESOURCE_URI,
     WORDCLOUD_MAX_TERMS,
+    build_docugis_tsv,
     build_viewer_url,
     build_wordcloud_url,
 )
@@ -71,6 +76,11 @@ tag_analysis, a facet distribution from post_classification, or terms you
 counted yourself in a get_document body — and renders it in DocuSky's own
 WordCloudLite tool, which also offers bubble/bar/table views of the same
 numbers.
+
+docugis_map maps places on DocuSky's DocuGIS2 tool. Give it rows of
+name + WGS84 x/y (+ optional date and text); it returns the TSV DocuGIS2
+imports, and MCP Apps hosts show that TSV beside the embedded tool for the
+user to paste. It never guesses coordinates: supply them, or ask the user.
 """
 
 _credentials = load_credentials()
@@ -537,6 +547,66 @@ async def word_cloud(
     )
 
 
+async def docugis_map(
+    rows: list[dict[str, Any]],
+    title: str | None = None,
+    include_dates: bool | None = None,
+    max_rows: int = DOCUGIS_MAX_ROWS,
+) -> str:
+    """Put places on a map in DocuSky's own DocuGIS2 tool.
+
+    Takes coordinates you already have — from the user, from a `placeInfo` in
+    search_documents, from a gazetteer, or from your own knowledge of where a
+    place is — and returns the TSV that DocuGIS2's import box accepts. This
+    tool does no geocoding and no searching: never invent coordinates for a
+    place you are unsure of; leave that row out, or ask the user.
+
+    DocuGIS2 cannot be fed data through a URL, so the last step belongs to the
+    user: MCP Apps-capable hosts show the TSV with a copy button next to the
+    embedded tool, and the user pastes it into DocuGIS2's box and presses 匯入
+    (the rendered map then does time filtering, routes, clustering, heatmaps
+    and export). Other hosts get the same TSV as text plus `webUrl`, to paste
+    into DocuGIS2 in a browser. Tell the user that paste step is theirs.
+
+    Args:
+        rows: One entry per place. `name` plus `x` (WGS84 longitude) and `y`
+            (latitude) are required; `date`, `text` and any other keys are
+            optional and become extra columns in DocuGIS2's popups. Common
+            aliases are understood (lng/lon/經度 -> x, lat/緯度 -> y,
+            地名 -> name). Example: [{"name": "鹿港", "x": 120.434,
+            "y": 24.057, "date": "1784-01-01", "text": "鹿港開港"}].
+        title: A name for this map, shown above the tool.
+        include_dates: Leave unset to decide automatically. DocuGIS2 drops any
+            row whose `date` cell is empty or a bare year, so a half-dated set
+            ships without the date column (every place on the map, no time
+            axis). Pass true to keep the timeline and lose the undated rows,
+            false to drop dates entirely.
+        max_rows: Keep at most this many places (default 2000).
+    """
+    try:
+        tsv, used, notes, skipped = build_docugis_tsv(
+            rows, include_dates=include_dates, max_rows=max_rows
+        )
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return _error(exc)
+    payload: dict[str, Any] = {
+        "title": title or "DocuGIS2 地圖",
+        "rowCount": len(used),
+        "columns": tsv.split("\n", 1)[0].split("\t"),
+        "tsv": tsv,
+        "howToUse": (
+            "DocuGIS2 沒有辦法用網址帶資料，最後一步要由使用者操作："
+            "複製上面的 tsv，貼進 DocuGIS2 的貼上框，按［匯入］。"
+        ),
+        "webUrl": DOCUGIS_PAGE,
+    }
+    if notes:
+        payload["notes"] = notes
+    if skipped:
+        payload["skipped"] = skipped
+    return _dump(payload)
+
+
 async def check_login() -> str:
     """Report whether DocuSky credentials are configured and whether they work.
 
@@ -593,6 +663,7 @@ if apps is not None:
     apps.tool(resource_uri=VIEWER_RESOURCE_URI)(post_classification)
     apps.tool(resource_uri=VIEWER_RESOURCE_URI)(tag_analysis)
     apps.tool(resource_uri=VIEWER_RESOURCE_URI)(word_cloud)
+    apps.tool(resource_uri=DOCUGIS_RESOURCE_URI)(docugis_map)
     apps.add_html_resource(
         VIEWER_RESOURCE_URI,
         VIEWER_HTML,
@@ -600,11 +671,18 @@ if apps is not None:
         description="內嵌顯示 DocuSky 官方的查詢結果／分布統計／標記分析／文字雲頁面",
         csp=ResourceCsp(frame_domains=["docusky.org.tw"]),
     )
+    apps.add_html_resource(
+        DOCUGIS_RESOURCE_URI,
+        DOCUGIS_HTML,
+        title="DocuGIS2 地圖",
+        description="把整理好的地點 TSV 交給使用者貼進內嵌的 DocuSky DocuGIS2 地圖工具",
+        csp=ResourceCsp(frame_domains=["docusky.org.tw"]),
+    )
 
 mcp = _Server(
     "docusky",
     instructions=INSTRUCTIONS,
-    version="0.3.1",
+    version="0.4.0",
     extensions=[apps] if apps is not None else None,
 )
 
@@ -619,6 +697,7 @@ if apps is None:
     mcp.tool()(post_classification)
     mcp.tool()(tag_analysis)
     mcp.tool()(word_cloud)
+    mcp.tool()(docugis_map)
 
 
 def main() -> None:

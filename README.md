@@ -127,6 +127,7 @@
 - **取全文** —— 單篇文獻完整讀出，長文自動分段
 - **標記分析** —— 統計文本裡的人名、地名、時間等標記
 - **文字雲** —— 把詞頻畫成 DocuSky 官方 WordCloudLite 的文字雲（同一份數字也能切換成泡泡圖、Top-10 長條圖、表格）
+- **地圖** —— 把地點（地名＋WGS84 經緯度，可加時間、說明）整理成 DocuSky 官方 DocuGIS2 的匯入 TSV，貼進去就能看時空分布、時間軸、路線、熱區
 - **雙維度交叉統計**（實驗性）—— 同時交叉兩個分類維度，DocuSky 伺服器端功能尚未完整，目前測試過的組合都會被拒絕
 - **私人資料庫** —— 填入帳密後也能查自己在 DocuSky 建的資料庫
 
@@ -140,7 +141,9 @@
 
 查詢類的內嵌只在**公開資料庫**（不需帳密）上生效——私人資料庫的登入狀態是伺服器端的，內嵌畫面沒辦法一起帶過去，所以私人查詢仍然只會拿到文字結果。文字雲不受這個限制：它畫的是已經拿到手的數字，資料從哪個資料庫來都可以。如果你用的 Claude 版本不支援 MCP Apps，這一切照常運作，只是不會出現內嵌畫面。
 
-少數 client 會用最嚴格的沙箱（沒有 `allow-same-origin`）來跑內嵌畫面，那種環境下 DocuSky 只有第一頁能正常顯示。擴充會自己偵測到並改成提示你按「瀏覽器開啟」，不會給你一排按了只會變空白的翻頁鈕。
+地圖（`docugis_map`）的內嵌長得不一樣：DocuGIS2 沒有辦法用網址帶資料進去，所以內嵌畫面上半是整理好的 TSV 加一顆「複製 TSV」，下半是 DocuGIS2 本體，**最後一步要你自己貼上**——按複製、在下方地圖左上角的 ⇥ 打開選單、點「1.2 匯入資料 Import Data」、在右邊的框貼上、按［匯入 Import］。貼完之後時間軸、路線、群聚、熱區、匯出都是 DocuGIS2 原生的功能。
+
+少數 client 會用最嚴格的沙箱（沒有 `allow-same-origin`）來跑內嵌畫面，那種環境下 DocuSky 只有第一頁能正常顯示。擴充會自己偵測到並改成提示你按「瀏覽器開啟」，不會給你一排按了只會變空白的翻頁鈕。DocuGIS2 在那種沙箱裡更直接：整頁卡在轉圈載不起來，所以擴充在偵測到時乾脆不嵌它，只給你 TSV 和「瀏覽器開啟 DocuGIS2」。
 
 ---
 
@@ -280,6 +283,7 @@ uv run --frozen --directory ${__dirname} server.py
 | `tag_analysis` | 標記統計 |
 | `twodim_analysis` | 雙維度交叉統計（實驗性，見下方說明） |
 | `word_cloud` | 把詞頻畫成 DocuSky WordCloudLite 文字雲 |
+| `docugis_map` | 把地點整理成 DocuGIS2 地圖的匯入 TSV |
 | `check_login` | 檢查登入狀態 |
 
 `search_documents` 刻意不回全文——DocuSky 單篇動輒六千字以上，一次二十筆會塞爆
@@ -316,6 +320,25 @@ context。要讀全文請用 `get_document`，帶入該筆的 `n`，並沿用同
 
 另外 WordCloudLite 在詞數多的時候會**刻意隨機取樣**一部分來畫（見它的
 `plotWordCloud`），所以想讓每個詞都出現，大約傳 20–40 個詞最穩。
+
+`docugis_map` 同樣不查詢、不做地理編碼：座標要由呼叫端給（使用者提供、
+`search_documents` 的 `placeInfo`、地名資料庫，或 Claude 自己確定知道的地點），
+不確定的地點就不要編——寧可留空或問使用者。它把 rows 整理成 DocuGIS2 匯入用的
+TSV（`id name x y date text` 加上任何額外欄位，`x` 是 WGS84 經度、`y` 是緯度），
+回傳 `tsv` 與 `webUrl`。
+
+DocuGIS2 的匯入器比想像中挑（2026-09-12 逐項實測，細節寫在 `docusky_mcp/ui.py`
+的註解裡）：`date` 欄只要有一格是空的或只寫年份（`1887`），那一列就會被整列丟掉，
+但整個 `date` 欄不存在時每一列都進得去。所以 `build_docugis_tsv` 會把純年份補成
+`YYYY-01`，而且在只有部分資料有日期時**預設不輸出 `date` 欄**（地圖完整、沒有時間
+軸），要時間軸就傳 `include_dates=true`，代價是沒日期的那幾列不會出現。`1887-01`、
+`1887/1/1`、`18870101`、`-0200-01-01`（西元前）都吃得下。
+
+DocuGIS2 也是這個專案裡唯一**不能**用網址餵資料的 DocuSky 工具：它 56 支
+script 沒有一支讀 `location.search`，也沒有註冊 `message` 監聽器，所以
+WordCloudLite 那套 `?data=` 在這裡完全不成立（它認得的 `index.html?f=<id>` 要先把
+資料寫進一個共用的公開帳號、資料就此公開，所以刻意不用）。剩下能走的就是它的貼上
+框，這也是為什麼地圖的 `ui://` 資源是另一份 HTML（`DOCUGIS_HTML`）。
 
 `search_documents`、`post_classification`、`tag_analysis` 這三個工具，在
 `target="OPEN"` 時回傳的 JSON 裡多了一個 `webUrl` 欄位，指向

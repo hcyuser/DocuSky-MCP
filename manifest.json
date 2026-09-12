@@ -2,9 +2,9 @@
   "manifest_version": "0.4",
   "name": "docusky",
   "display_name": "DocuSky 數位人文檢索",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "查詢 DocuSky 數位人文學術研究平台：全文檢索、分布統計、取全文。",
-  "long_description": "讓 Claude 直接查詢 DocuSky 數位人文學術研究平台（docusky.org.tw）的資料庫。支援 38 個公開資料庫的全文檢索（正統道藏、大明一統志、宋會要輯稿、朝鮮王朝實錄、淡新檔案、馬偕日記等），可做分布統計、取單篇全文、標記分析、雙維度交叉統計（實驗性）。也可以把詞頻（標記統計、分布統計或自行統計的結果）畫成 DocuSky WordCloudLite 文字雲。在支援 MCP Apps 的 Claude 版本中，公開資料庫的查詢結果、分布統計、標記分析與文字雲會內嵌顯示 DocuSky 官方網頁。填入帳號密碼後也能查詢自己的私人資料庫。公開資料庫不需要帳號。",
+  "long_description": "讓 Claude 直接查詢 DocuSky 數位人文學術研究平台（docusky.org.tw）的資料庫。支援 38 個公開資料庫的全文檢索（正統道藏、大明一統志、宋會要輯稿、朝鮮王朝實錄、淡新檔案、馬偕日記等），可做分布統計、取單篇全文、標記分析、雙維度交叉統計（實驗性）。也可以把詞頻（標記統計、分布統計或自行統計的結果）畫成 DocuSky WordCloudLite 文字雲，或把整理好的地點（地名＋WGS84 經緯度，可加時間與說明）做成 DocuGIS2 地圖用的 TSV，貼進 DocuGIS2 就能看時空分布。在支援 MCP Apps 的 Claude 版本中，公開資料庫的查詢結果、分布統計、標記分析與文字雲會內嵌顯示 DocuSky 官方網頁。填入帳號密碼後也能查詢自己的私人資料庫。公開資料庫不需要帳號。",
   "author": {
     "name": "hcyuser",
     "url": "https://github.com/hcyuser"
@@ -77,6 +77,10 @@
     {
       "name": "word_cloud",
       "description": "把詞頻資料畫成 DocuSky WordCloudLite 文字雲（可切換泡泡圖、長條圖、表格）"
+    },
+    {
+      "name": "docugis_map",
+      "description": "把地點（地名＋WGS84 經緯度）整理成 DocuGIS2 地圖的匯入 TSV，並內嵌 DocuGIS2 讓你貼上匯入"
     }
   ],
   "user_config": {
